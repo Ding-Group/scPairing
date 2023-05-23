@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from matplotlib.figure import Figure
 import time
-from typing import Mapping, Union
+from typing import Mapping, Union, Tuple
 import psutil
 import logging
 
@@ -184,6 +184,22 @@ class UnsupervisedTrainer:
             return max(min(1., epoch / fully_warmup_epoch) * max_weight, min_weight)
         else:
             return max_weight
+    
+    @staticmethod
+    def _calc_cutoff(
+        epoch: int,
+        n_epochs: int,
+        flip_contrastive_reconstruct: float
+    ) -> Tuple[int]:
+        """
+        Calculates the weight of contrastive and reconstruction losses.
+        The weights are either (1, 0) or (0, 1), the first occuring before
+        the cutoff and the latter occuring after.
+        """
+        if epoch <= n_epochs * flip_contrastive_reconstruct:
+            return (1, 0)
+        else:
+            return (0, 1)
 
     def update_step(self, jump_to_step: Union[None, int] = None) -> None:
         """Aligns the current step, epoch and lr to the given step number.
@@ -218,7 +234,7 @@ class UnsupervisedTrainer:
         reconstruct_cutoff_ratio: float = 0.,
         min_reconstruct_weight: float = 0.,
         max_reconstruct_weight: float = 0.5,
-        flip_contrastive_reconstruct: float = 0.6,
+        flip_contrastive_reconstruct: float = 0,
         eval: bool = True,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
@@ -254,7 +270,7 @@ class UnsupervisedTrainer:
             reconstruct_cutoff_ratio: ratio of cutoff ratios to n_epochs
             min_reconstruct_weight: minimum weight of reconstruction term
             max_reconstruct_weight: maximum weight of reconstruction term
-            flip_constrastive_reconstruct: proportion of epochs at which to switch from
+            flip_contrastive_reconstruct: proportion of epochs at which to switch from
                 training using contrastive loss to using reconstructive loss
         """
 
@@ -287,6 +303,7 @@ class UnsupervisedTrainer:
                 reconstruct_warmup_ratio=reconstruct_warmup_ratio,
                 min_reconstruct_weight=min_reconstruct_weight,
                 max_reconstruct_weight=max_reconstruct_weight,
+                flip_contrastive_reconstruct=flip_contrastive_reconstruct,
                 **train_kwargs
             )
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
@@ -380,6 +397,10 @@ class UnsupervisedTrainer:
             hyper_param_dict['reconstruct_weight'] = self._calc_weight(
                 self.epoch, kwargs['n_epochs'], kwargs['reconstruct_cutoff_ratio'], kwargs['reconstruct_warmup_ratio'],
                 kwargs['min_reconstruct_weight'], kwargs['max_reconstruct_weight']
+            )
+        if kwargs['flip_contrastive_reconstruct']:
+            hyper_param_dict['reconstruct_weight'], hyper_param_dict['contrastive_weight'] = self._calc_cutoff(
+                self.epoch, kwargs['n_epochs'], kwargs['flip_contrastive_reconstruct']
             )
 
         # construct data_dict
