@@ -1,0 +1,14 @@
+files:
+  rna:
+    - /arc/project/st-jiaruid-1/yinian/atac-rna/4_32606_rna.h5ad
+  protein:
+    - /arc/project/st-jiaruid-1/yinian/atac-rna/4_32606_atac.h5ad
+  gene_indices: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/scripts/gene_indices_3.pkl
+model_params:
+  n_epochs: 12000
+  eval_every: 3000
+  cell_type_col: cell_type
+  day: 4
+  donor: 32606
+  rna_n_vars: 22085
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/results/
