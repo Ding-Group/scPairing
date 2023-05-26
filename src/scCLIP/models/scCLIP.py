@@ -334,7 +334,7 @@ class scCLIP(BaseCellModel):
         if self.decode_features and hyper_param_dict.get("reconstruct_weight", 1):
             # If decoding is turned on and the reconstruction holds any weight in this procedure.
             decode_dict = self.decode(mod1_features, mod2_features, mod1_input, mod2_input)
-            nll = decode_dict['nll'] * hyper_param_dict['reconstruct_weight']
+            nll = decode_dict['nll'] * hyper_param_dict.get("reconstruct_weight", 1)
         else:
             nll = 0
         
@@ -351,7 +351,7 @@ class scCLIP(BaseCellModel):
             return fwd_dict
 
         if self.loss_method == 'clip' and hyper_param_dict.get("contrastive_weight", 1):
-            loss = nll + self.loss(mod1_features, mod2_features, self.logit_scale) * hyper_param_dict["contrastive_weight"]
+            loss = nll + self.loss(mod1_features, mod2_features, self.logit_scale) * hyper_param_dict.get("contrastive_weight", 1)
         elif self.loss_method == 'cosine':
             loss = nll + self.loss(mod1_features, mod2_features, torch.ones((mod1_features.shape[0],)))
         else:

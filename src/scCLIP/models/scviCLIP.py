@@ -32,7 +32,7 @@ def get_fully_connected_layers(
         lin = nn.Linear(input_dim, size)
         nn.init.xavier_normal_(lin.weight)
         layers.append(lin)
-        layers.append(nn.ReLU())
+        layers.append(nn.ELU())
         if bn:
             layers.append(nn.BatchNorm1d(size, track_running_stats=bn_track_running_stats))
         if dropout_prob:
@@ -116,7 +116,7 @@ class scCLIP(BaseCellModel):
         bn: bool = True,
         dropout_prob: float = 0.1,
         decode_features: bool = True,
-        decode_method: str = "four-way",
+        decode_method: str = "dropout",
         loss_method: str = 'clip',
         cell_dropout: bool = False,
         cell_dropout_prob: float = 0.2,
@@ -171,11 +171,11 @@ class scCLIP(BaseCellModel):
         self.to(device)
 
     def _init_decoders(self):
-        if self.decode_method == 'four-way':
-            self.mod1_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-            self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+        # if self.decode_method == 'four-way':
+        #     self.mod1_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+        #     self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+        #     self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+        #     self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
         elif self.decode_method == 'concat':
             self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod1))
             self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod2))
@@ -185,8 +185,18 @@ class scCLIP(BaseCellModel):
         elif self.decode_method == 'dropout':
             self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
             self.dropout_layer = torch.nn.Dropout()
-            self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+            # self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+            # self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+            self.mod1_decoder = get_fully_connected_layers(
+                self.emb_dim,
+                self.n_mod1,
+                self.hidden_dims[::-1]
+            )
+            self.mod2_decoder = get_fully_connected_layers(
+                self.emb_dim,
+                self.n_mod2,
+                self.hidden_dims[::-1]
+            )
 
     def decode(
         self,
@@ -200,8 +210,8 @@ class scCLIP(BaseCellModel):
         Decode the features according to the decoding method.
         The decoding methods should compute the NLL.
         """
-        if self.decode_method == 'four-way':
-            return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
+        # if self.decode_method == 'four-way':
+        #     return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
         elif self.decode_method == 'concat':
             return self._decode_concat(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
         elif self.decode_method == 'average':
@@ -298,14 +308,26 @@ class scCLIP(BaseCellModel):
         mod1_features[:, mod1_indices == 0] = 0
         mod2_features[:, (1 - mod1_indices) == 0] = 0
         combined = mod1_features + mod2_features
-        mod1_reconstruct = F.log_softmax(combined @ self.mod1_decoder, dim=-1)
-        mod2_reconstruct = F.log_softmax(combined @ self.mod2_decoder, dim=-1)
+        mod1_reconstruct = F.log_softmax(self.mod1_decoder(combined), dim=-1)
+        mod2_reconstruct = F.log_softmax(self.mod2_decoder(combined), dim=-1)
         nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
         return {
             'mod1_reconstruct': mod1_reconstruct,
             'mod2_reconstruct': mod2_reconstruct,
             'nll': nll / 2
         }
+
+    def inference(
+        self,
+        mod1_input: torch.Tensor,
+        mod2_input: torch.Tensor,
+        library_size_1: torch.Tensor,
+        library_size_2: torch.Tensor
+    ) -> Mapping[str, Any]:
+        """
+
+        """
+        pass
 
     def forward(
         self,
@@ -318,8 +340,8 @@ class scCLIP(BaseCellModel):
         counts_1, counts_2 = data_dict["cells_1"], data_dict["cells_2"]
         library_size_1, library_size_2 = data_dict["library_size_1"], data_dict["library_size_2"]
 
-        mod1_input = counts_1 / library_size_1
-        mod2_input = counts_2 / library_size_2
+        mod1_input = data_dict["cells_1_transformed"]
+        mod2_input = data_dict["cells_2_transformed"]
 
         if self.cell_dropout:
             mod1_features = self.mod1_encoder(self.cell_dropout(mod1_input))

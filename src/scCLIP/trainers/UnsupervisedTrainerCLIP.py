@@ -46,11 +46,11 @@ class UnsupervisedTrainer:
         ckpt_dir: directory to store the logs, the checkpoints and the plots.
     
     New attributes:
-        adata_gene: gene expression single-cell dataset
-        adata_protein: protein expresion single-cell dataset
-        train_adata_gene: the training data. Contains (1 - test_ratio) x 100% of
-            adata_gene.
-        test_adata_protein: the test data. Contains test_ratio x 100% of adata_protein.
+        adata_1: first modality single-cell dataset
+        adata_2: second modality single-cell dataset
+        train_adata_mod1: the training data. Contains (1 - test_ratio) x 100% of
+            adata_1.
+        test_adata_mod2: the test data. Contains test_ratio x 100% of adata_2.
     """
 
     attr_fname: Mapping[str, str] = dict(
@@ -61,15 +61,15 @@ class UnsupervisedTrainer:
     @log_arguments
     def __init__(self,
         model: BaseCellModel,
-        adata_gene: anndata.AnnData,
-        adata_protein: anndata.AnnData,
+        adata_1: anndata.AnnData,
+        adata_2: anndata.AnnData,
         ckpt_dir: Union[str, None] = None,
         test_ratio: float = 0.,
         data_split_seed: int = 1,
         init_lr: float = 5e-3,
         lr_decay: float = 6e-5,
         batch_size: int = 2000,
-        train_instance_name: str = "multiETM",
+        train_instance_name: str = "scCLIP",
         restore_epoch: int = 0,
         seed: int = -1,
     ) -> None:
@@ -77,8 +77,8 @@ class UnsupervisedTrainer:
 
         Args:
             model: the model to be trained.
-            adata_gene: the intact single-cell dataset (gene).
-            adata_protein: the intact single-cell dataset (protein).
+            adata_1: the intact single-cell dataset (first modality).
+            adata_2: the intact single-cell dataset (second modality).
             ckpt_dir: directory to store the logs, the checkpoints and the
                 plots. If training from scratch (restore_epoch = 0), this would
                 be the parent directory of the actual directory storing the
@@ -100,17 +100,17 @@ class UnsupervisedTrainer:
 
         self.model: BaseCellModel = model
 
-        self.train_adata_gene = self.test_adata_gene = self.adata_gene = adata_gene
-        self.train_adata_protein = self.test_adata_protein = self.adata_protein = adata_protein
+        self.train_adata_1 = self.test_adata_1 = self.adata_1 = adata_1
+        self.train_adata_2 = self.test_adata_2 = self.adata_2 = adata_2
         if test_ratio > 0:
-            self.train_adata_gene, self.test_adata_gene, self.train_adata_protein, self.test_adata_protein = \
-                train_test_split_cite(adata_gene, adata_protein, test_ratio, seed=data_split_seed)
+            self.train_adata_1, self.test_adata_1, self.train_adata_2, self.test_adata_2 = \
+                train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=init_lr)
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
-        self.steps_per_epoch = max(self.train_adata_gene.n_obs / self.batch_size, 1)
+        self.steps_per_epoch = max(self.train_adata_1.n_obs / self.batch_size, 1)
         self.device = model.device
         self.step = self.epoch = 0
         self.seed = seed
@@ -285,14 +285,14 @@ class UnsupervisedTrainer:
         eval_kwargs = default_eval_kwargs
         
         # set up sampler and dataloader
-        # if n_samplers == 1 or self.batch_size >= self.train_adata_gene.n_obs:
-        sampler = CellSampler(self.train_adata_gene, self.train_adata_protein, self.batch_size, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
+        # if n_samplers == 1 or self.batch_size >= self.train_adata_1.n_obs:
+        sampler = CellSampler(self.train_adata_1, self.train_adata_2, self.batch_size, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         # else:
         #     sampler = MultithreadedCellSampler(self.train_adata, self.batch_size, n_samplers = n_samplers, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         dataloader = iter(sampler)
         
         # set up the stats recorder
-        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_gene.obs)
+        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
 
         while self.epoch < n_epochs:
@@ -323,8 +323,8 @@ class UnsupervisedTrainer:
 
                 # log statistics of tracked items
                 recorder.log_and_clear_record()
-                if self.test_adata_gene is not self.adata_gene:
-                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata_gene, self.test_adata_protein, self.batch_size, batch_col=batch_col, emb_names=[])
+                if self.test_adata_1 is not self.adata_1:
+                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata_1, self.test_adata_2, self.batch_size, batch_col=batch_col, emb_names=[])
                     if test_nll is not None:
                         _logger.info(f'test nll: {test_nll:7.4f}')
                 else:
@@ -337,7 +337,7 @@ class UnsupervisedTrainer:
                     self.before_eval(batch_col=batch_col)
                     # if isinstance(self.model, scETM):
                         # self.model.write_topic_gene_embeddings_to_tensorboard(writer, self.adata.var_names, f'gene_topic_emb_epoch{int(next_ckpt_epoch)}')
-                    result = evaluate(adata = self.adata_gene, embedding_key = self.model.clustering_input, **current_eval_kwargs)
+                    result = evaluate(adata = self.adata_1, embedding_key = self.model.clustering_input, **current_eval_kwargs)
                     result['test_nll'] = test_nll
                     self._log_eval_result(result, next_ckpt_epoch, writer, eval_result_log_path)
 
@@ -415,5 +415,5 @@ class UnsupervisedTrainer:
         """Docstring (TODO)
         """
 
-        self.model.get_cell_embeddings_and_nll(self.adata_gene, self.adata_protein, self.batch_size, batch_col=batch_col, emb_names=self.model.emb_names)
+        self.model.get_cell_embeddings_and_nll(self.adata_1, self.adata_2, self.batch_size, batch_col=batch_col, emb_names=self.model.emb_names)
 

@@ -1,5 +1,5 @@
 import threading
-from typing import Any, Iterator, List, Mapping, Union
+from typing import Any, Iterator, List, Mapping, Union, Callable
 
 import anndata
 import numpy as np
@@ -18,6 +18,8 @@ class CellSampler():
         n_epochs: number of epochs to sample before raising StopIteration.
         X_1: a (dense or sparse) matrix containing the cell-first_modality matrix.
         X_2: a (dense or sparse) matrix containing the cell-second_modality matrix.
+        X_1_transformed: X_1 after applying the first modality transformation.
+        X_2_transformed: X_2 after applying the second modality transformation.
         is_sparse_1: whether self.X_1 is a sparse matrix.
         is_sparse_2: whether self.X_2 is a sparse matrix
         shuffle: whether to shuffle the dataset at the beginning of each epoch.
@@ -81,6 +83,9 @@ class CellSampler():
         else:
             self.library_size_2: Union[spmatrix, np.ndarray] = adata_2.X.sum(1, keepdims=True)
 
+        self.X_1_transformed = mod1_transform(self.X_1, self.library_size_1) if mod1_transform else self.X_1
+        self.X_2_transformed = mod2_transform(self.X_2, self.library_size_2) if mod2_transform else self.X_2
+
         self.sample_batch_id: bool = sample_batch_id
         if self.sample_batch_id:
             assert batch_col in adata_1.obs, f'{batch_col} not in adata.obs'
@@ -122,10 +127,14 @@ class CellSampler():
         X_2 = torch.FloatTensor(self.X_2.todense() if self.is_sparse_2 else self.X_2)
         library_size_1 = torch.FloatTensor(self.library_size_1)
         library_size_2 = torch.FloatTensor(self.library_size_2)
+        X_1_transformed = torch.FloatTensor(self.X_1_transformed.todense() if self.is_sparse_1 else self.X_1)
+        X_2_transformed = torch.FloatTensor(self.X_2_transformed.todense() if self.is_sparse_2 else self.X_2)
         cell_indices = torch.arange(0, self.n_cells, dtype=torch.long)
         result_dict = dict(cells_1=X_1, cells_2=X_2,
                         library_size_1=library_size_1,
                         library_size_2=library_size_2,
+                        cells_1_transformed=X_1_transformed,
+                        cells_2_transformed=X_2_transformed,
                         cell_indices=cell_indices)
         if self.sample_batch_id:
             result_dict['batch_indices'] = torch.LongTensor(self.batch_indices)
@@ -173,10 +182,16 @@ class CellSampler():
                 cells_2 = torch.FloatTensor(X_2.todense())
             else:
                 cells_2 = torch.FloatTensor(X_2)
+
+            X_1_transformed = self.X_1_transformed[batch, :]
+            X_2_transformed = self.X_2_transformed[batch, :]
+
             cell_indices = torch.LongTensor(batch)
             result_dict = dict(cells_1=cells_1, cells_2=cells_2,
                         library_size_1=library_size_1,
                         library_size_2=library_size_2,
+                        cells_1_transformed=X_1_transformed,
+                        cells_2_transformed=X_2_transformed,
                         cell_indices=cell_indices)
             if self.sample_batch_id:
                 result_dict['batch_indices'] = torch.LongTensor(self.batch_indices[batch])
