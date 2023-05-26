@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from matplotlib.figure import Figure
 import time
-from typing import Mapping, Union, Tuple
+from typing import Mapping, Union, Tuple, Optional
 import psutil
 import logging
 
@@ -51,6 +51,9 @@ class UnsupervisedTrainer:
         train_adata_mod1: the training data. Contains (1 - test_ratio) x 100% of
             adata_1.
         test_adata_mod2: the test data. Contains test_ratio x 100% of adata_2.
+        raw_layer: layer in AnnData corresponding to raw counts. If None, use .X
+        transformed_layer: layer in AnnData corresponding to transformed counts.
+            If None, use .X
     """
 
     attr_fname: Mapping[str, str] = dict(
@@ -63,6 +66,8 @@ class UnsupervisedTrainer:
         model: BaseCellModel,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
+        raw_layer: Optional[str] = None,
+        transformed_layer: Optional[str] = None,
         ckpt_dir: Union[str, None] = None,
         test_ratio: float = 0.,
         data_split_seed: int = 1,
@@ -79,6 +84,8 @@ class UnsupervisedTrainer:
             model: the model to be trained.
             adata_1: the intact single-cell dataset (first modality).
             adata_2: the intact single-cell dataset (second modality).
+            raw_layer: layer corresponding to raw counts.
+            transformed_layer: layer corresponding to transformed counts.
             ckpt_dir: directory to store the logs, the checkpoints and the
                 plots. If training from scratch (restore_epoch = 0), this would
                 be the parent directory of the actual directory storing the
@@ -106,6 +113,8 @@ class UnsupervisedTrainer:
             self.train_adata_1, self.test_adata_1, self.train_adata_2, self.test_adata_2 = \
                 train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
         
+        self.raw_layer = raw_layer
+        self.transformed_layer = transformed_layer
         self.optimizer = optim.Adam(self.model.parameters(), lr=init_lr)
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
@@ -286,7 +295,14 @@ class UnsupervisedTrainer:
         
         # set up sampler and dataloader
         # if n_samplers == 1 or self.batch_size >= self.train_adata_1.n_obs:
-        sampler = CellSampler(self.train_adata_1, self.train_adata_2, self.batch_size, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
+        sampler = CellSampler(
+            self.train_adata_1,
+            self.train_adata_2,
+            self.batch_size,
+            sample_batch_id=self.model.need_batch,
+            n_epochs=n_epochs - self.epoch,
+            batch_col=batch_col
+        )
         # else:
         #     sampler = MultithreadedCellSampler(self.train_adata, self.batch_size, n_samplers = n_samplers, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         dataloader = iter(sampler)

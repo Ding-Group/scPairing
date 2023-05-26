@@ -1,5 +1,5 @@
 import threading
-from typing import Any, Iterator, List, Mapping, Union, Callable
+from typing import Any, Iterator, List, Mapping, Union, Callable, Optional
 
 import anndata
 import numpy as np
@@ -38,6 +38,8 @@ class CellSampler():
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
         batch_size: int,
+        raw_layer: Optional[str] = None,
+        transformed_layer: Optional[str] = None,
         sample_batch_id: bool = False,
         n_epochs: Union[float, int] = np.inf,
         rng: Union[None, np.random.Generator] = None,
@@ -50,6 +52,8 @@ class CellSampler():
             adata_1: an AnnData object storing the dataset of the first modality.
             adata_2: an AnnData object storing the dataset of the second modality.
             batch_size: size of each sampled minibatch.
+            raw_layer: AnnData layer corresponding to raw counts.
+            transformed_layer: AnnData layer corresponding to transformed counts.
             sample_batch_id: whether to yield batch indices in each sample.
             n_epochs: number of epochs to sample before raising StopIteration.
             rng: the random number generator.
@@ -65,10 +69,13 @@ class CellSampler():
         self.n_cells: int = adata_1.n_obs
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
-        self.is_sparse_1: bool = isinstance(adata_1.X, spmatrix)
-        self.is_sparse_2: bool = isinstance(adata_2.X, spmatrix)
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.X
+        
+        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if raw_layer else adata_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[transformed_layer] if raw_layer else adata_2.X
+
+        self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
+        self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
+
         if shuffle:
             self.rng: Union[None, np.random.Generator] = rng or np.random.default_rng()
         else:
@@ -83,8 +90,8 @@ class CellSampler():
         else:
             self.library_size_2: Union[spmatrix, np.ndarray] = adata_2.X.sum(1, keepdims=True)
 
-        self.X_1_transformed = mod1_transform(self.X_1, self.library_size_1) if mod1_transform else self.X_1
-        self.X_2_transformed = mod2_transform(self.X_2, self.library_size_2) if mod2_transform else self.X_2
+        self.X_1_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_1.X
+        self.X_2_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_2.X
 
         self.sample_batch_id: bool = sample_batch_id
         if self.sample_batch_id:
