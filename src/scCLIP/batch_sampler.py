@@ -70,8 +70,8 @@ class CellSampler():
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
         
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if raw_layer else adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[transformed_layer] if raw_layer else adata_2.X
+        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer] if raw_layer else adata_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer] if raw_layer else adata_2.X
 
         self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
         self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
@@ -181,17 +181,22 @@ class CellSampler():
             library_size_2 = torch.FloatTensor(self.library_size_2[batch])
             X_1 = self.X_1[batch, :]
             X_2 = self.X_2[batch, :]
-            if self.is_sparse_1:
-                cells_1 = torch.FloatTensor(X_1.todense())
-            else:
-                cells_1 = torch.FloatTensor(X_1)
-            if self.is_sparse_2:
-                cells_2 = torch.FloatTensor(X_2.todense())
-            else:
-                cells_2 = torch.FloatTensor(X_2)
-
+            
             X_1_transformed = self.X_1_transformed[batch, :]
             X_2_transformed = self.X_2_transformed[batch, :]
+
+            if self.is_sparse_1:
+                cells_1 = torch.FloatTensor(X_1.todense())
+                X_1_transformed = torch.FloatTensor(X_1_transformed.todense())
+            else:
+                cells_1 = torch.FloatTensor(X_1)
+                X_1_transformed = torch.FloatTensor(X_1_transformed)
+            if self.is_sparse_2:
+                cells_2 = torch.FloatTensor(X_2.todense())
+                X_2_transformed = torch.FloatTensor(X_2_transformed.todense())
+            else:
+                cells_2 = torch.FloatTensor(X_2)
+                X_2_transformed = torch.FloatTensor(X_2_transformed)
 
             cell_indices = torch.LongTensor(batch)
             result_dict = dict(cells_1=cells_1, cells_2=cells_2,
