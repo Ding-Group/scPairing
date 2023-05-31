@@ -117,6 +117,7 @@ class scCLIP(BaseCellModel):
         dropout_prob: float = 0.1,
         decode_features: bool = True,
         decode_method: str = "four-way",
+        linear_decoder: bool = False,
         loss_method: str = 'clip',
         cell_dropout: bool = False,
         cell_dropout_prob: float = 0.2,
@@ -163,6 +164,7 @@ class scCLIP(BaseCellModel):
 
         self.decode_features = decode_features
         self.decode_method = decode_method
+        self.linear_decoder = linear_decoder
         if self.decode_features:
             self._init_decoders()
 
@@ -171,22 +173,41 @@ class scCLIP(BaseCellModel):
         self.to(device)
 
     def _init_decoders(self):
-        if self.decode_method == 'four-way':
-            self.mod1_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-            self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-        elif self.decode_method == 'concat':
-            self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod1))
-            self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod2))
-        elif self.decode_method == 'average':
-            self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-        elif self.decode_method == 'dropout':
-            self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
-            self.dropout_layer = torch.nn.Dropout()
-            self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-            self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+        if self.linear_decoder:
+            if self.decode_method == 'four-way':
+                self.mod1_to_mod1 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+                
+                self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+                self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+                self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+            elif self.decode_method == 'concat':
+                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod1))
+                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod2))
+            elif self.decode_method == 'average':
+                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+            elif self.decode_method == 'dropout':
+                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
+                self.dropout_layer = torch.nn.Dropout()
+                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
+                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+        else:
+            if self.decode_method == 'four-way':
+                self.mod1_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+                self.mod1_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+                self.mod2_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+                self.mod2_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+            elif self.decode_method == 'concat':
+                self.mod1_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod1, self.hidden_dims[::-1])
+                self.mod2_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod2, self.hidden_dims[::-1])
+            elif self.decode_method == 'average':
+                self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+                self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+            elif self.decode_method == 'dropout':
+                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
+                self.dropout_layer = torch.nn.Dropout()
+                self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+                self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
 
     def decode(
         self,
@@ -248,8 +269,8 @@ class scCLIP(BaseCellModel):
         of the latent features.
         """
         concat = torch.cat([mod1_features, mod2_features], dim=1)
-        mod1_reconstruct = F.log_softmax(concat @ self.mod1_decoder, dim=-1)
-        mod2_reconstruct = F.log_softmax(concat @ self.mod2_decoder, dim=-1)
+        mod1_reconstruct = F.log_softmax(self.mod1_decoder(concat), dim=-1)
+        mod2_reconstruct = F.log_softmax(self.mod2_decoder(concat), dim=-1)
         nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
         return {
             'mod1_reconstruct': mod1_reconstruct,
@@ -272,8 +293,8 @@ class scCLIP(BaseCellModel):
         # Should this try to find the actual midpoint on a line betwen the two poitns
         # on the hypersphere?
         avg = (mod1_features + mod2_features) / 2
-        mod1_reconstruct = F.log_softmax(avg @ self.mod1_decoder, dim=-1)
-        mod2_reconstruct = F.log_softmax(avg @ self.mod2_decoder, dim=-1)
+        mod1_reconstruct = F.log_softmax(self.mod1_decoder(avg), dim=-1)
+        mod2_reconstruct = F.log_softmax(self.mod2_decoder(avg), dim=-1)
         nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
         return {
             'mod1_reconstruct': mod1_reconstruct,
@@ -298,8 +319,8 @@ class scCLIP(BaseCellModel):
         mod1_features[:, mod1_indices == 0] = 0
         mod2_features[:, (1 - mod1_indices) == 0] = 0
         combined = mod1_features + mod2_features
-        mod1_reconstruct = F.log_softmax(combined @ self.mod1_decoder, dim=-1)
-        mod2_reconstruct = F.log_softmax(combined @ self.mod2_decoder, dim=-1)
+        mod1_reconstruct = F.log_softmax(self.mod1_decoder(combined), dim=-1)
+        mod2_reconstruct = F.log_softmax(self.mod2_decoder(combined), dim=-1)
         nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
         return {
             'mod1_reconstruct': mod1_reconstruct,
@@ -344,7 +365,7 @@ class scCLIP(BaseCellModel):
             "logit_scale": self.logit_scale.exp(),
             "nll": nll
         }
-        if self.decode_features:
+        if self.decode_features and hyper_param_dict.get("reconstruct_weight", 1):
             fwd_dict = fwd_dict | decode_dict
 
         if not self.training:
@@ -352,6 +373,8 @@ class scCLIP(BaseCellModel):
 
         if self.loss_method == 'clip' and hyper_param_dict.get("contrastive_weight", 1):
             loss = nll + self.loss(mod1_features, mod2_features, self.logit_scale) * hyper_param_dict.get("contrastive_weight", 1)
+        elif self.loss_method == 'clip':
+            loss = nll
         elif self.loss_method == 'cosine':
             loss = nll + self.loss(mod1_features, mod2_features, torch.ones((mod1_features.shape[0],)))
         else:

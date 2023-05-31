@@ -206,9 +206,9 @@ class UnsupervisedTrainer:
         the cutoff and the latter occuring after.
         """
         if epoch <= n_epochs * flip_contrastive_reconstruct:
-            return (1, 0)
-        else:
             return (0, 1)
+        else:
+            return (1, 0)
 
     def update_step(self, jump_to_step: Union[None, int] = None) -> None:
         """Aligns the current step, epoch and lr to the given step number.
