@@ -316,7 +316,7 @@ class scCLIP(BaseCellModel):
         mod1_indices = self.dropout_layer(self.emb_indices) / 2  # Undo the correction that nn.Dropout does
         mod1_indices = mod1_indices.long()
         mod1_features[:, mod1_indices == 0] = 0
-        mod2_features[:, (1 - mod1_indices) == 0] = 0
+        mod2_features[:, mod1_indices != 0] = 0
         combined = mod1_features + mod2_features
         mod1_reconstruct = F.log_softmax(self.mod1_decoder(combined), dim=-1)
         mod2_reconstruct = F.log_softmax(self.mod2_decoder(combined), dim=-1)
