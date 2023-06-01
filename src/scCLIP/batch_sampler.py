@@ -82,13 +82,13 @@ class CellSampler():
             self.rng: Union[None, np.random.Generator] = None
         self.shuffle: bool = shuffle
         if self.is_sparse_1:
-            self.library_size_1: Union[spmatrix, np.ndarray] = adata_1.X.sum(1)
+            self.library_size_1: Union[spmatrix, np.ndarray] = self.X_1.sum(1)
         else:
-            self.library_size_1: Union[spmatrix, np.ndarray] = adata_1.X.sum(1, keepdims=True)
+            self.library_size_1: Union[spmatrix, np.ndarray] = self.X_1.sum(1, keepdims=True)
         if self.is_sparse_2:
-            self.library_size_2: Union[spmatrix, np.ndarray] = adata_2.X.sum(1)
+            self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1)
         else:
-            self.library_size_2: Union[spmatrix, np.ndarray] = adata_2.X.sum(1, keepdims=True)
+            self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1, keepdims=True)
 
         self.X_1_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_1.X
         self.X_2_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_2.X
