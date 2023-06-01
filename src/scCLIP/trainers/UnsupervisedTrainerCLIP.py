@@ -299,6 +299,8 @@ class UnsupervisedTrainer:
             self.train_adata_1,
             self.train_adata_2,
             self.batch_size,
+            raw_layer=self.raw_layer,
+            transformed_layer=self.transformed_layer,
             sample_batch_id=self.model.need_batch,
             n_epochs=n_epochs - self.epoch,
             batch_col=batch_col
