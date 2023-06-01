@@ -175,22 +175,22 @@ class scCLIP(BaseCellModel):
     def _init_decoders(self):
         if self.linear_decoder:
             if self.decode_method == 'four-way':
-                self.mod1_to_mod1 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+                self.mod1_to_mod1 = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
                 
-                self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-                self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-                self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+                self.mod1_to_mod2 = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
+                self.mod2_to_mod1 = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
+                self.mod2_to_mod2 = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
             elif self.decode_method == 'concat':
-                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod1))
-                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod2))
+                self.mod1_decoder = nn.Linear(self.emb_dim * 2, self.n_mod1, bias=False)
+                self.mod2_decoder = nn.Linear(self.emb_dim * 2, self.n_mod2, bias=False)
             elif self.decode_method == 'average':
-                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+                self.mod1_decoder = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
+                self.mod2_decoder = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
             elif self.decode_method == 'dropout':
                 self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
                 self.dropout_layer = torch.nn.Dropout()
-                self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
-                self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
+                self.mod1_decoder = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
+                self.mod2_decoder = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
         else:
             if self.decode_method == 'four-way':
                 self.mod1_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
