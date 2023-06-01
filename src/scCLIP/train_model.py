@@ -23,7 +23,7 @@ def main(config):
     files = config['files']
     model_params = config['model_params']
     trainer_params = config['trainer_params']
-    if model_params['cell_type_col'] == 'None':
+    if config['cell_type_col'] == 'None':
         model_params['cell_type_col'] = None
 
     mod1_files, mod2_files = files['mod1'], files['mod2']
