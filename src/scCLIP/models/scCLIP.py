@@ -14,6 +14,9 @@ from .BaseCellModel import BaseCellModel
 from batch_sampler import CellSampler
 
 
+_logger = logging.getLogger(__name__)
+
+
 def get_fully_connected_layers(
     input_dim: int,
     output_dim: int,
@@ -171,6 +174,8 @@ class scCLIP(BaseCellModel):
         self.cell_dropout = nn.Dropout(cell_dropout_prob) if cell_dropout else None
 
         self.to(device)
+
+        _logger.info(self.__str__())
 
     def _init_decoders(self):
         if self.linear_decoder:
@@ -382,7 +387,7 @@ class scCLIP(BaseCellModel):
         record = dict(loss=loss)
         record = {k: v.detach().item() for k, v in record.items()}
         return loss, fwd_dict, record
-    
+
     def get_cell_embeddings_and_nll(
         self,
         adata_1: anndata.AnnData,

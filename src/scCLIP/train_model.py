@@ -45,9 +45,9 @@ def main(config):
         model,
         mod1_adata,
         mod2_adata,
-        raw_layer=trainer_params['raw'],
+        raw_layer=trainer_params['raw_layer'],
         transformed_layer=trainer_params['transformed_layer'],
-        ckpt_dir='./results/protein/',
+        ckpt_dir=config['ckpt_dir'],
         batch_size=trainer_params['batch_size'],
     )
 
