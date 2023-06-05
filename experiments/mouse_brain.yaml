@@ -13,7 +13,9 @@ model_params:
 trainer_params:
   n_epochs: 2
   eval_every: 800
-  raw_layer: raw
+  raw_layer:
+    - raw
+    - binary
   transformed_layer:
   batch_size: 500
   flip_contrastive_reconstruct: 0
