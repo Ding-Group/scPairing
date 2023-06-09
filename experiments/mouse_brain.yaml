@@ -11,7 +11,7 @@ model_params:
   decode_method: dropout
   cell_dropout: False
 trainer_params:
-  n_epochs: 2
+  n_epochs: 800
   eval_every: 800
   raw_layer:
     - raw

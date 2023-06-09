@@ -17,11 +17,11 @@ trainer_params:
     - raw
     - binary
   transformed_layer:
-  batch_size: 800
-  flip_contrastive_reconstruct: 0
+  batch_size: 2000
+  flip_contrastive_reconstruct: 0.5
   reconstruct_warmup_ratio: 0
   reconstruct_cutoff_ratio: 0
   max_reconstruct_weight: 0
 cell_type_col: cell_type
 mod1_n_vars: 23418
-ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/results/pbmc
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/pbmc
