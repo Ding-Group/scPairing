@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from matplotlib.figure import Figure
 import time
-from typing import Mapping, Union, Tuple, Optional
+from typing import Mapping, Union, Tuple, Optional, List
 import psutil
 import logging
 
@@ -66,8 +66,8 @@ class UnsupervisedTrainer:
         model: BaseCellModel,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
-        raw_layer: Optional[str] = None,
-        transformed_layer: Optional[str] = None,
+        raw_layer: Optional[Union[str, List[str]]] = None,
+        transformed_layer: Optional[Union[str, List[str]]] = None,
         ckpt_dir: Union[str, None] = None,
         test_ratio: float = 0.,
         data_split_seed: int = 1,

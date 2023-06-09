@@ -443,7 +443,7 @@ def draw_embeddings(adata: ad.AnnData,
         fname: str = "umap.pdf",
         return_fig: bool = False,
         dpi: int = 300,
-        umap_kwargs: dict = dict()
+        umap_kwargs: dict = dict(output_metric='haversine')
     ) -> Union[None, Figure]:
     """Embeds, plots and optionally saves the neighborhood graph with UMAP.
 

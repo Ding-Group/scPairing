@@ -12,9 +12,7 @@ from torch.distributions import Normal, Independent
 from logging_utils import log_arguments
 from .BaseCellModel import BaseCellModel
 from batch_sampler import CellSampler
-
-
-_logger = logging.getLogger(__name__)
+from .log_likelihood import log_nb_positive
 
 
 def get_fully_connected_layers(
@@ -119,11 +117,12 @@ class scCLIP(BaseCellModel):
         bn: bool = True,
         dropout_prob: float = 0.1,
         decode_features: bool = True,
-        decode_method: str = "four-way",
+        combine_method: str = "dropout",
         linear_decoder: bool = False,
         loss_method: str = 'clip',
         cell_dropout: bool = False,
         cell_dropout_prob: float = 0.2,
+        library_nn: bool = False,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         """
@@ -140,7 +139,10 @@ class scCLIP(BaseCellModel):
         self.hidden_dims = hidden_dims
         self.bn = bn
         self.dropout = dropout_prob
+        self.beta = 7  # TODO: Make this a hyperparameter
 
+        # Encoder networks
+        self.cell_dropout = nn.Dropout(cell_dropout_prob) if cell_dropout else None
         self.mod1_encoder = get_fully_connected_layers(
             self.n_mod1,
             self.emb_dim,
@@ -155,8 +157,11 @@ class scCLIP(BaseCellModel):
             bn=self.bn,
             dropout_prob=self.dropout
         )
+        # self.mean_encoder = nn.Linear(hidden_dims[0], self.emb_dim)
+        # self.var_encoder = nn.Linear(hidden_dims[0], self.emb_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        # Loss function
         self.loss_method = loss_method
         if self.loss_method == 'clip':
             self.loss = ClipLoss()  # Custom loss function
@@ -166,52 +171,76 @@ class scCLIP(BaseCellModel):
             self.loss = torch.nn.MSELoss()
 
         self.decode_features = decode_features
-        self.decode_method = decode_method
+        self.combine_method = combine_method
         self.linear_decoder = linear_decoder
         if self.decode_features:
             self._init_decoders()
 
-        self.cell_dropout = nn.Dropout(cell_dropout_prob) if cell_dropout else None
+        self.library_nn = library_nn
+        if self.library_nn:
+            self.library_size_nn_1 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
+            # self.library_size_nn_2 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
+        else:
+            self.library_size_nn_1 = self.library_size_nn_2 = None
 
         self.to(device)
 
-        _logger.info(self.__str__())
-
     def _init_decoders(self):
         if self.linear_decoder:
-            if self.decode_method == 'four-way':
-                self.mod1_to_mod1 = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
-                self.mod1_to_mod2 = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
-                self.mod2_to_mod1 = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
-                self.mod2_to_mod2 = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
-            elif self.decode_method == 'concat':
-                self.mod1_decoder = nn.Linear(self.emb_dim * 2, self.n_mod1, bias=False)
-                self.mod2_decoder = nn.Linear(self.emb_dim * 2, self.n_mod2, bias=False)
-            elif self.decode_method == 'average':
-                self.mod1_decoder = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
-                self.mod2_decoder = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
-            elif self.decode_method == 'dropout':
-                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
+            # if self.combine_method == 'four-way':
+            #     self.mod1_to_mod1 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+            #     self.mod1_to_mod2 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
+            #     self.mod2_to_mod1 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+            #     self.mod2_to_mod2 = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
+            if self.combine_method == 'concat':
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod1), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod2), bias=False)
+            elif self.combine_method == 'average':
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
+            elif self.combine_method == 'dropout':
+                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float) + 1
                 self.dropout_layer = torch.nn.Dropout()
-                self.mod1_decoder = nn.Linear(self.emb_dim, self.n_mod1, bias=False)
-                self.mod2_decoder = nn.Linear(self.emb_dim, self.n_mod2, bias=False)
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
         else:
-            if self.decode_method == 'four-way':
-                self.mod1_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
-                self.mod1_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
-                self.mod2_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
-                self.mod2_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
-            elif self.decode_method == 'concat':
+            # if self.combine_method == 'four-way':
+            #     self.mod1_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+            #     self.mod1_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+            #     self.mod2_to_mod1 = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+            #     self.mod2_to_mod2 = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+            if self.combine_method == 'concat':
                 self.mod1_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod1, self.hidden_dims[::-1])
                 self.mod2_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod2, self.hidden_dims[::-1])
-            elif self.decode_method == 'average':
+            elif self.combine_method == 'average':
                 self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
                 self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
-            elif self.decode_method == 'dropout':
-                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float) + 1  # Don't want the first index to always be 0
+            elif self.combine_method == 'dropout':
+                self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
                 self.dropout_layer = torch.nn.Dropout()
-                self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
-                self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+                # self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
+                # self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+                self.mod1_decoder = nn.Sequential(
+                    nn.Linear(self.emb_dim, 128),
+                    nn.BatchNorm1d(128),
+                    nn.ELU(),
+                    nn.Linear(128, self.n_mod1),
+                    nn.ReLU()
+                )
+                self.mod2_decoder = nn.Sequential(
+                    nn.Linear(self.emb_dim, 128),
+                    nn.BatchNorm1d(128),
+                    nn.ELU(),
+                    nn.Linear(128, self.n_mod2),
+                    nn.Sigmoid()  # Directly predict binary
+                )
+                # self.mod1_decoder_scale = nn.Sequential(nn.Linear(128, self.n_mod1), nn.Softmax(-1))
+                # self.mod1_decoder_std = nn.Linear(128, self.n_mod1)
+                # Problem is that we need two different probabilities, depending on the modality
+                # Negative binomial for RNA, Bernoulli for ATAC.
+                # self.mod2_decoder_scale = nn.Sequential(nn.Linear(128, self.n_mod2), nn.Softmax(-1))
+                # self.mod2_decoder_std = nn.Linear(128, n_mod2)
+        self.mod1_dispersion = nn.Parameter(torch.rand(self.n_mod1))
 
     def decode(
         self,
@@ -219,20 +248,73 @@ class scCLIP(BaseCellModel):
         mod2_features: torch.Tensor,
         mod1_input: torch.Tensor,
         mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None
-    ) -> Mapping[str, Any]:
+        counts_1: torch.Tensor,
+        counts_2: torch.Tensor,
+        library_size_1: torch.Tensor,
+        library_size_2: torch.Tensor,
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
         """
         Decode the features according to the decoding method.
         The decoding methods should compute the NLL.
         """
-        if self.decode_method == 'four-way':
-            return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.decode_method == 'concat':
+        # if self.combine_method == 'four-way':
+        #     return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
+        if self.combine_method == 'concat':
             return self._decode_concat(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.decode_method == 'average':
+        elif self.combine_method == 'average':
             return self._decode_average(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.decode_method == 'dropout':
-            return self._decode_dropout(mod1_features.clone(), mod2_features.clone(), mod1_input, mod2_input, batch_indices)
+        elif self.combine_method == 'dropout':
+            return self._decode_dropout(
+                mod1_features.clone(),
+                mod2_features.clone(),
+                counts_1,
+                counts_2,
+                library_size_1,
+                library_size_2,
+                batch_indices
+            )
+
+    def new_decode(
+        self,
+        combined_features: torch.Tensor,
+        counts_1: torch.Tensor,
+        counts_2: torch.Tensor,
+        library_size_1: torch.Tensor,
+        library_size_2: torch.Tensor,
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
+        """
+        New decode that takes in the combined features
+        """
+        mod1_reconstruct = self.mod1_decoder(combined_features)
+        mod2_reconstruct = self.mod2_decoder(combined_features)
+
+        # Adjust RNA counts for library size
+        if self.library_size_nn_1:
+            x_library_size = torch.cat([counts_1, library_size_1], -1)
+            library_size_1 = self.library_size_nn_1(x_library_size).exp()
+        mod1_reconstruct_means = mod1_reconstruct * library_size_1
+
+        # Don't need to adjust ATAC for libary size as they are binarized
+
+        # Calculate negative binomial loss
+        mod1_dispersion = self.mod1_dispersion.exp()  # Take exponent to avoid <= 0 dispersions
+
+        # Since this is a probability, need to take negative for loss.
+        mod1_log_px = log_nb_positive(counts_1, mod1_reconstruct_means, mod1_dispersion)
+
+        # F.binary_cross_entropy parameters
+        # - input: tensor of arbitrary shape as probabilities
+        # - target: tensor of the same shape as input with values between 0 and 1
+        # Since this is a loss function, don't need to take its negative
+        mod2_log_px = F.binary_cross_entropy(mod2_reconstruct, counts_2, reduction="none").sum(-1)
+        # mod2_log_px = (-mod2_reconstruct * counts_2).sum(-1)
+
+        return {
+            'mod1_reconstruct': mod1_reconstruct_means,
+            'mod2_reconstruct': mod2_reconstruct,
+            'nll': -mod1_log_px.mean() / self.n_mod1 + self.beta * mod2_log_px.mean() / self.n_mod2
+        }
+
 
     def _decode_four_way(
         self,
@@ -240,8 +322,7 @@ class scCLIP(BaseCellModel):
         mod2_features: torch.Tensor,
         mod1_input: torch.Tensor,
         mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None
-    ) -> Mapping[str, Any]:
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
         """
         Decode the features into the two modality data using the four-way
         method from BABEL.
@@ -266,8 +347,7 @@ class scCLIP(BaseCellModel):
         mod2_features: torch.Tensor,
         mod1_input: torch.Tensor,
         mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None
-    ) -> Mapping[str, Any]:
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
         """
         Decode the features into the two modality data using a concatenation
         of the latent features.
@@ -288,8 +368,7 @@ class scCLIP(BaseCellModel):
         mod2_features: torch.Tensor,
         mod1_input: torch.Tensor,
         mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None
-    ) -> Mapping[str, Any]:
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
         """
         Decode the features into the two modality data using an average across
         the two latent features.
@@ -297,7 +376,6 @@ class scCLIP(BaseCellModel):
         # Should this try to find the actual midpoint on a line betwen the two poitns
         # on the hypersphere?
         avg = (mod1_features + mod2_features) / 2
-        avg = torch.norm(avg, p=2, dim=-1, keepdim=True)
         mod1_reconstruct = F.log_softmax(self.mod1_decoder(avg), dim=-1)
         mod2_reconstruct = F.log_softmax(self.mod2_decoder(avg), dim=-1)
         nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
@@ -311,27 +389,64 @@ class scCLIP(BaseCellModel):
         self,
         mod1_features: torch.Tensor,
         mod2_features: torch.Tensor,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None
-    ) -> Mapping[str, Any]:
+        counts_1: torch.Tensor,
+        counts_2: torch.Tensor,
+        library_size_1: torch.Tensor,
+        library_size_2: torch.Tensor,
+        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
         """
         Decode the features into the two modality data using a combination
         of the two features with dropout.
         """
-        mod1_indices = self.dropout_layer(self.emb_indices) / 2  # Undo the correction that nn.Dropout does
+        mod1_indices = self.dropout_layer(self.emb_indices)
         mod1_indices = mod1_indices.long()
         mod1_features[:, mod1_indices == 0] = 0
         mod2_features[:, mod1_indices != 0] = 0
         combined = mod1_features + mod2_features
-        mod1_reconstruct = F.log_softmax(self.mod1_decoder(combined), dim=-1)
-        mod2_reconstruct = F.log_softmax(self.mod2_decoder(combined), dim=-1)
-        nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
+        # mod1_reconstruct = F.log_softmax(combined @ self.mod1_decoder, dim=-1)
+        # mod2_reconstruct = F.log_softmax(combined @ self.mod2_decoder, dim=-1)
+
+        # To implement negative binomial loss, need to have mean and dispersion neural network.
+
+        mod1_reconstruct = self.mod1_decoder(combined)
+        mod2_reconstruct = self.mod2_decoder(combined)
+
+        if self.library_size_nn_1 is not None:
+            mod1_count_lib = torch.cat([counts_1, library_size_1], -1)
+            mod2_count_lib = torch.cat([counts_2, library_size_2], -1)
+            library_size_1 = self.library_size_nn_1(mod1_count_lib).exp()
+            library_size_2 = self.library_size_nn_2(mod2_count_lib).exp()
+
+        mod1_reconstruct = mod1_reconstruct * library_size_1
+        mod2_reconstruct = mod2_reconstruct * library_size_2
+
+        # This won't be the nll later.
+        nll = (-mod1_reconstruct * counts_1).sum(-1).mean() + (-mod2_reconstruct * counts_2).sum(-1).mean()
         return {
             'mod1_reconstruct': mod1_reconstruct,
             'mod2_reconstruct': mod2_reconstruct,
             'nll': nll / 2
         }
+
+    def combine_features(
+        self,
+        mod1_features: torch.Tensor,
+        mod2_features: torch.Tensor) -> torch.Tensor:
+        """
+        Combines the features using the combine_method of this model
+        """
+        if self.combine_method == 'concat':
+            return torch.cat([mod1_features, mod2_features], dim=1)
+        elif self.combine_method == 'average':
+            averaged = (mod1_features + mod2_features) / 2
+            return averaged / torch.norm(averaged, p=2, dim=-1, keepdim=True)
+        elif self.combine_method == 'dropout':
+            mod1_indices = self.dropout_layer(self.emb_indices) / 2  # Undo the correction that nn.Dropout does
+            mod1_indices = mod1_indices.long()
+            mod1_features[:, mod1_indices == 0] = 0
+            mod2_features[:, mod1_indices != 0] = 0
+            combined = mod1_features + mod2_features
+            return combined
 
     def forward(
         self,
@@ -344,22 +459,40 @@ class scCLIP(BaseCellModel):
         counts_1, counts_2 = data_dict["cells_1"], data_dict["cells_2"]
         library_size_1, library_size_2 = data_dict["library_size_1"], data_dict["library_size_2"]
 
-        mod1_input = counts_1 / library_size_1
-        mod2_input = counts_2 / library_size_2
+        mod1_input = data_dict["cells_1_transformed"]
+        mod2_input = data_dict["cells_2_transformed"]
 
         if self.cell_dropout:
             mod1_features = self.mod1_encoder(self.cell_dropout(mod1_input))
         else:
             mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
-        
+
         # L2 normalization
         mod1_features = F.normalize(mod1_features)
         mod2_features = F.normalize(mod2_features)
 
+        combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
+
         if self.decode_features and hyper_param_dict.get("reconstruct_weight", 1):
             # If decoding is turned on and the reconstruction holds any weight in this procedure.
-            decode_dict = self.decode(mod1_features, mod2_features, mod1_input, mod2_input)
+            decode_dict = self.new_decode(
+                combined_features,
+                counts_1,
+                counts_2,
+                library_size_1,
+                library_size_2
+            )
+            # decode_dict = self.decode(
+            #     mod1_features,
+            #     mod2_features,
+            #     counts_1,
+            #     counts_2,
+            #     library_size_1,
+            #     library_size_2,
+            #     mod1_input,
+            #     mod2_input
+            # )
             nll = decode_dict['nll'] * hyper_param_dict.get("reconstruct_weight", 1)
         else:
             nll = 0
@@ -378,6 +511,7 @@ class scCLIP(BaseCellModel):
 
         if self.loss_method == 'clip' and hyper_param_dict.get("contrastive_weight", 1):
             loss = nll + self.loss(mod1_features, mod2_features, self.logit_scale) * hyper_param_dict.get("contrastive_weight", 1)
+            # print("CONTRASTIVE", loss - nll)
         elif self.loss_method == 'clip':
             loss = nll
         elif self.loss_method == 'cosine':
@@ -388,7 +522,7 @@ class scCLIP(BaseCellModel):
         record = dict(loss=loss)
         record = {k: v.detach().item() for k, v in record.items()}
         return loss, fwd_dict, record
-
+    
     def get_cell_embeddings_and_nll(
         self,
         adata_1: anndata.AnnData,

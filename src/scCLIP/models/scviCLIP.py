@@ -176,7 +176,7 @@ class scCLIP(BaseCellModel):
         #     self.mod1_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
         #     self.mod2_to_mod1 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod1))
         #     self.mod2_to_mod2 = nn.Parameter(torch.randn(self.emb_dim, self.n_mod2))
-        elif self.decode_method == 'concat':
+        if self.decode_method == 'concat':
             self.mod1_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod1))
             self.mod2_decoder = nn.Parameter(torch.randn(self.emb_dim * 2, self.n_mod2))
         elif self.decode_method == 'average':
@@ -212,7 +212,7 @@ class scCLIP(BaseCellModel):
         """
         # if self.decode_method == 'four-way':
         #     return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.decode_method == 'concat':
+        if self.decode_method == 'concat':
             return self._decode_concat(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
         elif self.decode_method == 'average':
             return self._decode_average(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)

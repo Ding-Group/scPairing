@@ -38,8 +38,8 @@ class CellSampler():
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
         batch_size: int,
-        raw_layer: Optional[str] = None,
-        transformed_layer: Optional[str] = None,
+        raw_layer: Optional[Union[str, List[str]]] = None,
+        transformed_layer: Optional[Union[str, List[str]]] = None,
         sample_batch_id: bool = False,
         n_epochs: Union[float, int] = np.inf,
         rng: Union[None, np.random.Generator] = None,
@@ -52,8 +52,11 @@ class CellSampler():
             adata_1: an AnnData object storing the dataset of the first modality.
             adata_2: an AnnData object storing the dataset of the second modality.
             batch_size: size of each sampled minibatch.
-            raw_layer: AnnData layer corresponding to raw counts.
+            raw_layer: AnnData layer corresponding to raw counts. If it is a singular str,
+                the same raw_layer will be applied to both AnnDatas. If it is a list,
+                the first will be applied to adata_1, second applied to adata_2
             transformed_layer: AnnData layer corresponding to transformed counts.
+                Same premise as raw_layer.
             sample_batch_id: whether to yield batch indices in each sample.
             n_epochs: number of epochs to sample before raising StopIteration.
             rng: the random number generator.
@@ -69,9 +72,14 @@ class CellSampler():
         self.n_cells: int = adata_1.n_obs
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
+
+        if isinstance(raw_layer, str) or raw_layer is None:
+            raw_layer = [raw_layer, raw_layer]
+        if isinstance(transformed_layer, str) or transformed_layer is None:
+            transformed_layer = [transformed_layer, transformed_layer]
         
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer] if raw_layer else adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer] if raw_layer else adata_2.X
+        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer[0]] if raw_layer[0] else adata_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer[1]] if raw_layer[1] else adata_2.X
 
         self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
         self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
@@ -90,8 +98,8 @@ class CellSampler():
         else:
             self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1, keepdims=True)
 
-        self.X_1_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_1.X
-        self.X_2_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer] if transformed_layer else adata_2.X
+        self.X_1_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer[0]] if transformed_layer[0] else adata_1.X
+        self.X_2_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer[1]] if transformed_layer[1] else adata_2.X
 
         self.sample_batch_id: bool = sample_batch_id
         if self.sample_batch_id:

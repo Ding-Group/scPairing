@@ -4,17 +4,17 @@ import argparse
 sys.path.append('./')
 os.environ[ 'NUMBA_CACHE_DIR' ] = '/scratch/st-jiaruid-1/yinian/tmp/' # https://github.com/scverse/scanpy/issues/2113
 
-import scanpy as sc
-import numpy as np
+# import scanpy as sc
+# import numpy as np
 import anndata as ad
-import torch
+# import torch
 import yaml
 from pathlib import Path
-import pickle
 import matplotlib.pyplot as plt
 # import umap
 
-from models.scCLIP import scCLIP, ClipLoss
+# from models.scCLIP import scCLIP
+from models.scCLIP_share import scCLIP
 from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
 from eval_utils import evaluate
 
@@ -37,7 +37,7 @@ def main(config):
         emb_dim=model_params['emb_dim'],
         hidden_dims=model_params['hidden_dims'],
         decode_features=model_params['decode_features'],
-        decode_method=model_params['decode_method'],
+        combine_method=model_params['decode_method'],
         cell_dropout=model_params['cell_dropout']
     )
 
