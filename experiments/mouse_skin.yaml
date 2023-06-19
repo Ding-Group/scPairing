@@ -1,8 +1,8 @@
 files:
   mod1:
-    - /arc/project/st-jiaruid-1/yinian/atac-rna/4_32606_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_skin_rna.h5ad
   mod2:
-    - /arc/project/st-jiaruid-1/yinian/atac-rna/4_32606_atac.h5ad
+    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_skin_atac.h5ad
 model_params:
   emb_dim: 3
   hidden_dims:
@@ -11,9 +11,9 @@ model_params:
   decode_method: dropout
   cell_dropout: False
 trainer_params:
-  n_epochs: 600
-  eval_every: 600
-  raw_layer: 
+  n_epochs: 800
+  eval_every: 800
+  raw_layer:
     - raw
     - binary
   transformed_layer:
@@ -22,6 +22,6 @@ trainer_params:
   reconstruct_warmup_ratio: 0
   reconstruct_cutoff_ratio: 0
   max_reconstruct_weight: 0
-cell_type_col: cell_type
-mod1_n_vars: 23418
-ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/pbmc
+cell_type_col: celltype
+mod1_n_vars: 21127
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse-brain/
