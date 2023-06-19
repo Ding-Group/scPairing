@@ -45,6 +45,13 @@ def get_fully_connected_layers(
     return nn.Sequential(*layers)
 
 
+def distance_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the total distance between x and y on the hypersphere
+    """
+    return torch.sum(torch.acos(torch.sum(x * y, dim=-1)))
+
+
 class ClipLoss(nn.Module):
     """
     Implementation of ClipLoss borrowed from OpenCLIP
@@ -125,6 +132,7 @@ class scCLIP(BaseCellModel):
         cell_dropout: bool = False,
         cell_dropout_prob: float = 0.2,
         library_nn: bool = False,
+        loss_ratio: float = 10.,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         """
@@ -142,6 +150,7 @@ class scCLIP(BaseCellModel):
         self.bn = bn
         self.dropout = dropout_prob
         self.beta = 7  # TODO: Make this a hyperparameter
+        self.loss_ratio = loss_ratio
 
         # Encoder networks
         self.cell_dropout = nn.Dropout(cell_dropout_prob) if cell_dropout else None
@@ -182,7 +191,7 @@ class scCLIP(BaseCellModel):
         elif self.loss_method == 'cosine':
             self.loss = torch.nn.CosineEmbeddingLoss()
         elif self.loss_method == 'euclidean':
-            self.loss = torch.nn.MSELoss()
+            self.loss = distance_loss
 
         self.decode_features = decode_features
         self.combine_method = combine_method
@@ -238,38 +247,6 @@ class scCLIP(BaseCellModel):
                 )
         self.mod1_dispersion = nn.Parameter(torch.rand(self.n_mod1))
 
-    def decode(
-        self,
-        mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor,
-        counts_1: torch.Tensor,
-        counts_2: torch.Tensor,
-        library_size_1: torch.Tensor,
-        library_size_2: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
-        """
-        Decode the features according to the decoding method.
-        The decoding methods should compute the NLL.
-        """
-        # if self.combine_method == 'four-way':
-        #     return self._decode_four_way(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        if self.combine_method == 'concat':
-            return self._decode_concat(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.combine_method == 'average':
-            return self._decode_average(mod1_features, mod2_features, mod1_input, mod2_input, batch_indices)
-        elif self.combine_method == 'dropout':
-            return self._decode_dropout(
-                mod1_features.clone(),
-                mod2_features.clone(),
-                counts_1,
-                counts_2,
-                library_size_1,
-                library_size_2,
-                batch_indices
-            )
-
     def new_decode(
         self,
         combined_features: torch.Tensor,
@@ -309,119 +286,6 @@ class scCLIP(BaseCellModel):
             'mod1_reconstruct': mod1_reconstruct_means,
             'mod2_reconstruct': mod2_reconstruct,
             'nll': mod1_log_px / self.n_mod1 - self.beta * mod2_log_px / self.n_mod2
-        }
-
-
-    def _decode_four_way(
-        self,
-        mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
-        """
-        Decode the features into the two modality data using the four-way
-        method from BABEL.
-        """
-        mod1_to_mod1 = F.log_softmax(mod1_features @ self.mod1_to_mod1, dim=-1)
-        mod1_to_mod2 = F.log_softmax(mod1_features @ self.mod1_to_mod2, dim=-1)
-        mod2_to_mod1 = F.log_softmax(mod2_features @ self.mod2_to_mod1, dim=-1)
-        mod2_to_mod2 = F.log_softmax(mod2_features @ self.mod2_to_mod2, dim=-1)
-        nll = (-mod1_to_mod1 * mod1_input).sum(-1).mean() + (-mod1_to_mod2 * mod2_input).sum(-1).mean() + \
-              (-mod2_to_mod1 * mod1_input).sum(-1).mean() + (-mod2_to_mod2 * mod2_input).sum(-1).mean()
-        return {
-            'mod1_to_mod1': mod1_to_mod1,
-            'mod1_to_mod2': mod1_to_mod2,
-            'mod2_to_mod1': mod2_to_mod1,
-            'mod2_to_mod2': mod2_to_mod2,
-            'nll': nll / 4
-        }
-    
-    def _decode_concat(
-        self,
-        mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
-        """
-        Decode the features into the two modality data using a concatenation
-        of the latent features.
-        """
-        concat = torch.cat([mod1_features, mod2_features], dim=1)
-        mod1_reconstruct = F.log_softmax(self.mod1_decoder(concat), dim=-1)
-        mod2_reconstruct = F.log_softmax(self.mod2_decoder(concat), dim=-1)
-        nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
-        return {
-            'mod1_reconstruct': mod1_reconstruct,
-            'mod2_reconstruct': mod2_reconstruct,
-            'nll': nll / 2
-        }
-    
-    def _decode_average(
-        self,
-        mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
-        """
-        Decode the features into the two modality data using an average across
-        the two latent features.
-        """
-        # Should this try to find the actual midpoint on a line betwen the two poitns
-        # on the hypersphere?
-        avg = (mod1_features + mod2_features) / 2
-        mod1_reconstruct = F.log_softmax(self.mod1_decoder(avg), dim=-1)
-        mod2_reconstruct = F.log_softmax(self.mod2_decoder(avg), dim=-1)
-        nll = (-mod1_reconstruct * mod1_input).sum(-1).mean() + (-mod2_reconstruct * mod2_input).sum(-1).mean()
-        return {
-            'mod1_reconstruct': mod1_reconstruct,
-            'mod2_reconstruct': mod2_reconstruct,
-            'nll': nll / 2
-        }
-    
-    def _decode_dropout(
-        self,
-        mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor,
-        counts_1: torch.Tensor,
-        counts_2: torch.Tensor,
-        library_size_1: torch.Tensor,
-        library_size_2: torch.Tensor,
-        batch_indices: Union[None, torch.Tensor] = None) -> Mapping[str, Any]:
-        """
-        Decode the features into the two modality data using a combination
-        of the two features with dropout.
-        """
-        mod1_indices = self.dropout_layer(self.emb_indices)
-        mod1_indices = mod1_indices.long()
-        mod1_features[:, mod1_indices == 0] = 0
-        mod2_features[:, mod1_indices != 0] = 0
-        combined = mod1_features + mod2_features
-        # mod1_reconstruct = F.log_softmax(combined @ self.mod1_decoder, dim=-1)
-        # mod2_reconstruct = F.log_softmax(combined @ self.mod2_decoder, dim=-1)
-
-        # To implement negative binomial loss, need to have mean and dispersion neural network.
-
-        mod1_reconstruct = self.mod1_decoder(combined)
-        mod2_reconstruct = self.mod2_decoder(combined)
-
-        if self.library_size_nn_1 is not None:
-            mod1_count_lib = torch.cat([counts_1, library_size_1], -1)
-            mod2_count_lib = torch.cat([counts_2, library_size_2], -1)
-            library_size_1 = self.library_size_nn_1(mod1_count_lib).exp()
-            library_size_2 = self.library_size_nn_2(mod2_count_lib).exp()
-
-        mod1_reconstruct = mod1_reconstruct * library_size_1
-        mod2_reconstruct = mod2_reconstruct * library_size_2
-
-        # This won't be the nll later.
-        nll = (-mod1_reconstruct * counts_1).sum(-1).mean() + (-mod2_reconstruct * counts_2).sum(-1).mean()
-        return {
-            'mod1_reconstruct': mod1_reconstruct,
-            'mod2_reconstruct': mod2_reconstruct,
-            'nll': nll / 2
         }
 
     def combine_features(
@@ -524,7 +388,7 @@ class scCLIP(BaseCellModel):
         elif self.loss_method == 'cosine':
             contrastive_loss = self.loss(mod1_features, mod2_features, torch.ones((mod1_features.shape[0],)))
         else:
-            contrastive_loss = self.loss(mod1_features, mod2_features)
+            contrastive_loss = self.loss(mod1_features, mod2_features) / self.loss_ratio
 
         log_pz = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device).log_prob(z)
         log_qz_x = PowerSpherical(mu, var.squeeze(-1)).log_prob(z)
@@ -612,27 +476,6 @@ class scCLIP(BaseCellModel):
             fwd_dict = self(data_dict, hyper_param_dict=hyper_param_dict)
             if callback is not None:
                 callback(data_dict, fwd_dict)
-
-    def predict_mod1_to_mod2_forward(
-        self,
-        data_dict: Mapping[str, torch.Tensor],
-        hyper_param_dict: Mapping[str, Any] = dict()
-    ) -> Mapping[str, Any]:
-        """
-        Given data from modality 1, predict the corresponding
-        expression of modality 2.
-        """
-        counts_1 = data_dict["cells_1"]
-        library_size_1 = data_dict["library_size_1"]
-        mod1_input = counts_1 / library_size_1
-        mod1_features = self.mod1_encoder(mod1_input)
-
-        mod1_to_mod2 = F.log_softmax(mod1_features @ self.mod1_to_mod2, dim=-1)
-
-        fwd_dict = {
-            "mod1_features": mod1_features,
-            "log_mod2_predicted": mod1_to_mod2
-        }
 
 
 class HypersphericalUniform(torch.distributions.Distribution):
