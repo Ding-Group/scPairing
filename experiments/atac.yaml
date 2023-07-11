@@ -4,24 +4,37 @@ files:
   mod2:
     - /arc/project/st-jiaruid-1/yinian/atac-rna/4_32606_atac.h5ad
 model_params:
-  emb_dim: 3
+  emb_dim: 10
   hidden_dims:
     - 128
   decode_features: True
   decode_method: dropout
-  cell_dropout: False
+  decode_hvar: True
+  cell_dropout: True
+  discriminative: False
+  downsample_clip: True
+  downsample_clip_prob: 0.1
+  loss_method: clip
+  loss_ratio: 1
 trainer_params:
   n_epochs: 600
-  eval_every: 600
-  raw_layer: 
+  eval_every: 300
+  ping_every: 100
+  highly_variable: True
+  decode_highly_variable: True
+  raw_layer:
     - raw
     - binary
   transformed_layer:
-  batch_size: 500
+  batch_size: 1000
+  weight_decay: 0.01
+  # logit_weight_decay: 1
+  flip_clip_dist: 0
   flip_contrastive_reconstruct: 0
   reconstruct_warmup_ratio: 0
   reconstruct_cutoff_ratio: 0
   max_reconstruct_weight: 0
 cell_type_col: cell_type
 mod1_n_vars: 23418
+reconstruct: True
 ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/pbmc

@@ -1,24 +1,24 @@
 files:
   mod1:
-    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_brain_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/v2-shareseq/mini_bmmc_rna.h5ad
   mod2:
-    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_brain_atac.h5ad
+    - /arc/project/st-jiaruid-1/yinian/v2-shareseq/mini_bmmc_atac.h5ad
 model_params:
-  emb_dim: 8
+  emb_dim: 20
   hidden_dims:
     - 128
   decode_features: True
   decode_method: dropout
   decode_hvar: True
-  cell_dropout: True
+  cell_dropout: False
   discriminative: False
-  downsample_clip: True
-  downsample_clip_prob: 0.5
-  cap_temperature: 10
+  downsample_clip: False
+  downsample_clip_prob: 0.1
+  # cap_temperature: 0.1
   loss_method: clip
   loss_ratio: 1
 trainer_params:
-  n_epochs: 600
+  n_epochs: 300
   eval_every: 300
   ping_every: 100
   highly_variable: True
@@ -28,7 +28,7 @@ trainer_params:
     - binary
   transformed_layer:
   batch_size: 2000
-  # logit_weight_decay: 1
+  logit_weight_decay: 1
   weight_decay: 0.001
   flip_clip_dist: 0
   flip_contrastive_reconstruct: 0
@@ -38,4 +38,4 @@ trainer_params:
 cell_type_col: celltype
 mod1_n_vars: 2146
 reconstruct: True
-ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse-brain/
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mini_bmmc/

@@ -4,24 +4,36 @@ files:
   mod2:
     - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_skin_atac.h5ad
 model_params:
-  emb_dim: 3
+  emb_dim: 20
   hidden_dims:
     - 128
   decode_features: True
   decode_method: dropout
+  decode_hvar: True
   cell_dropout: False
+  discriminative: False
+  downsample_clip: False
+  downsample_clip_prob: 0.1
+  cap_temperature: 15
+  loss_method: clip
+  loss_ratio: 1
 trainer_params:
-  n_epochs: 800
-  eval_every: 800
+  n_epochs: 300
+  eval_every: 300
+  ping_every: 50
+  highly_variable: True
+  decode_highly_variable: True
   raw_layer:
     - raw
     - binary
   transformed_layer:
-  batch_size: 500
+  batch_size: 2000
+  flip_clip_dist: 0
   flip_contrastive_reconstruct: 0
   reconstruct_warmup_ratio: 0
   reconstruct_cutoff_ratio: 0
   max_reconstruct_weight: 0
 cell_type_col: celltype
-mod1_n_vars: 21127
-ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse-brain/
+mod1_n_vars: 2146
+reconstruct: True
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse_skin/
