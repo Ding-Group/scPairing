@@ -1,4 +1,4 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Callable
+from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Callable, Optional
 import math
 import anndata
 import numpy as np
@@ -14,7 +14,7 @@ from logging_utils import log_arguments
 from .BaseCellModel import BaseCellModel
 from batch_sampler import CellSampler
 from .log_likelihood import log_nb_positive
-from .distributions import PowerSpherical
+from .distributions import PowerSpherical, _kl_powerspherical_uniform
 
 
 def get_fully_connected_layers(
@@ -33,9 +33,9 @@ def get_fully_connected_layers(
     layers = []
     for i, size in enumerate(hidden_dims):
         lin = nn.Linear(input_dim, size)
-        nn.init.xavier_normal_(lin.weight)
+        # nn.init.xavier_normal_(lin.weight)
         layers.append(lin)
-        layers.append(nn.ReLU())
+        layers.append(nn.ELU())
         if bn:
             layers.append(nn.BatchNorm1d(size, track_running_stats=bn_track_running_stats))
         if dropout_prob:
@@ -49,9 +49,10 @@ def distance_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     Computes the total distance between x and y on the hypersphere
     """
-    return torch.sum(torch.acos(torch.sum(x * y, dim=-1)))
+    dot = torch.clamp(torch.sum(x * y, dim=-1), -1 + 1e-7, 1 - 1e-7)
+    return torch.mean(torch.acos(dot))
 
-
+# TODO: Think about downsampling for efficiency
 class ClipLoss(nn.Module):
     """
     Implementation of ClipLoss borrowed from OpenCLIP
@@ -59,13 +60,17 @@ class ClipLoss(nn.Module):
     """
     def __init__(
         self,
-        cache_labels: bool = False
+        cache_labels: bool = False,
+        downsample_clip: bool = False,
+        downsample_clip_prob: float = 0.5
     ) -> None:
         """
         Initialize the CLIP loss
         """
         super().__init__()
         self.cache_labels = cache_labels
+        self.downsample_clip = downsample_clip
+        self.downsample_clip_prob = downsample_clip_prob
         
         # cache state
         self.prev_num_logits = 0
@@ -99,6 +104,11 @@ class ClipLoss(nn.Module):
         Compute forward Clip Loss. It is the average of the cross entropies computed
         from the two logits, logits_per_atac and logits_per_gex
         """
+        if self.downsample_clip:
+            mask = torch.rand(atac_features.shape[0]) < self.downsample_clip_prob
+            atac_features = atac_features[mask, :]
+            gex_features = gex_features[mask, :]
+
         device = atac_features.device
         logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
 
@@ -122,17 +132,25 @@ class scCLIP(BaseCellModel):
         n_mod2: int,
         n_batches: int,
         emb_dim: int = 64,
+        n_mod1_var: Optional[int] = None,
+        n_mod2_var: Optional[int] = None,
         hidden_dims: Sequence[int] = (128,),
         bn: bool = True,
         dropout_prob: float = 0.1,
         decode_features: bool = True,
+        decode_hvar: bool = False,
         combine_method: str = "dropout",
         linear_decoder: bool = False,
         loss_method: str = 'clip',
+        discriminative: bool = False,
         cell_dropout: bool = False,
         cell_dropout_prob: float = 0.2,
+        downsample_clip: bool = False,
+        downsample_clip_prob: float = 0.5,
+        set_temperature: Optional[float] = None,
+        cap_temperature: Optional[float] = None,
         library_nn: bool = False,
-        loss_ratio: float = 10.,
+        loss_ratio: float = 1.,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         """
@@ -143,6 +161,13 @@ class scCLIP(BaseCellModel):
         In the future, the two encoders should be passed in.
         """
         super().__init__(n_mod1, n_batches, need_batch=n_batches > 1, device=device)
+
+        # self.n_mod1_input = n_mod1 if n_mod1_var is None else n_mod1_var
+        # self.n_mod2_input = n_mod2 if n_mod2_var is None else n_mod2_var
+        self.n_mod1_input = n_mod1
+        self.n_mod2_input = n_mod2
+        self.n_mod1_output = n_mod1 if n_mod1_var is None and not decode_hvar else n_mod1_var
+        self.n_mod2_output = n_mod2 if n_mod2_var is None and not decode_hvar else n_mod2_var
         self.n_mod1 = n_mod1
         self.n_mod2 = n_mod2
         self.emb_dim = emb_dim
@@ -151,30 +176,19 @@ class scCLIP(BaseCellModel):
         self.dropout = dropout_prob
         self.beta = 7  # TODO: Make this a hyperparameter
         self.loss_ratio = loss_ratio
+        self.decode_hvar = decode_hvar
 
         # Encoder networks
         self.cell_dropout = nn.Dropout(cell_dropout_prob) if cell_dropout else None
-        # self.mod1_encoder = nn.Sequential(
-        #     nn.Linear(self.n_mod1, 128),
-        #     nn.LayerNorm(128),
-        #     nn.ELU(),
-        #     nn.Dropout(self.dropout),
-        # )
-        # self.mod2_encoder = nn.Sequential(
-        #     nn.Linear(self.n_mod2, 128),
-        #     nn.LayerNorm(128),
-        #     nn.ELU(),
-        #     nn.Dropout(self.dropout),
-        # )
         self.mod1_encoder = get_fully_connected_layers(
-            self.n_mod1,
+            self.n_mod1_input,
             self.emb_dim,
             self.hidden_dims,
             bn=self.bn,
             dropout_prob=self.dropout
         )
         self.mod2_encoder = get_fully_connected_layers(
-            self.n_mod2,
+            self.n_mod2_input,
             self.emb_dim,
             self.hidden_dims,
             bn=self.bn,
@@ -182,16 +196,33 @@ class scCLIP(BaseCellModel):
         )
         self.mean_encoder = nn.Linear(self.emb_dim, self.emb_dim)
         self.var_encoder = nn.Linear(self.emb_dim, 1)
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        if set_temperature is not None:
+            self.logit_scale = torch.ones([]) * set_temperature 
+        else:
+            self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.cap_temperature = cap_temperature
+
+        self.discriminative = discriminative
+        if self.discriminative:
+            self.discriminator = nn.Sequential(
+                nn.Linear(self.emb_dim, 128),
+                nn.LayerNorm(128),
+                nn.ELU(),
+                nn.Linear(128, 1),
+                nn.Sigmoid()  # Directly predict binary
+            )
+            self.bce_loss = torch.nn.BCELoss()
 
         # Loss function
         self.loss_method = loss_method
-        if self.loss_method == 'clip':
-            self.loss = ClipLoss()  # Custom loss function
-        elif self.loss_method == 'cosine':
-            self.loss = torch.nn.CosineEmbeddingLoss()
-        elif self.loss_method == 'euclidean':
-            self.loss = distance_loss
+        # if self.loss_method == 'clip':
+        self.clip_loss = ClipLoss(downsample_clip=downsample_clip, downsample_clip_prob=downsample_clip_prob)  # Custom loss function
+        # elif self.loss_method == 'cosine':
+        #   self.loss = torch.nn.CosineEmbeddingLoss()
+        # elif self.loss_method == 'euclidean':
+        # self.dist_loss = torch.nn.MSELoss()
+        self.dist_loss = distance_loss
+        # self.euclidean_loss = torch.nn.MSELoss()
 
         self.decode_features = decode_features
         self.combine_method = combine_method
@@ -200,34 +231,34 @@ class scCLIP(BaseCellModel):
             self._init_decoders()
 
         self.library_nn = library_nn
-        if self.library_nn:
-            self.library_size_nn_1 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
-            # self.library_size_nn_2 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
-        else:
-            self.library_size_nn_1 = self.library_size_nn_2 = None
+        # if self.library_nn:
+        #     self.library_size_nn_1 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
+        #     # self.library_size_nn_2 = get_fully_connected_layers(self.n_mod1 + 1, 1, (128,))
+        # else:
+        self.library_size_nn_1 = self.library_size_nn_2 = None
 
         self.to(device)
 
     def _init_decoders(self):
         if self.linear_decoder:
             if self.combine_method == 'concat':
-                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod1), bias=False)
-                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod2), bias=False)
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod1_output), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim * 2, self.n_mod2_output), bias=False)
             elif self.combine_method == 'average':
-                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
-                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1_output), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2_output), bias=False)
             elif self.combine_method == 'dropout':
                 self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float) + 1
                 self.dropout_layer = torch.nn.Dropout()
-                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1), bias=False)
-                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2), bias=False)
+                self.mod1_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod1_output), bias=False)
+                self.mod2_decoder = nn.Sequential(nn.Linear(self.emb_dim, self.n_mod2_output), bias=False)
         else:
             if self.combine_method == 'concat':
-                self.mod1_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod1, self.hidden_dims[::-1])
-                self.mod2_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod2, self.hidden_dims[::-1])
+                self.mod1_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod1_output, self.hidden_dims[::-1])
+                self.mod2_decoder = get_fully_connected_layers(self.emb_dim * 2, self.n_mod2_output, self.hidden_dims[::-1])
             elif self.combine_method == 'average':
-                self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1, self.hidden_dims[::-1])
-                self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2, self.hidden_dims[::-1])
+                self.mod1_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod1_output, self.hidden_dims[::-1])
+                self.mod2_decoder = get_fully_connected_layers(self.emb_dim, self.n_mod2_output, self.hidden_dims[::-1])
             elif self.combine_method == 'dropout':
                 self.emb_indices = torch.arange(self.emb_dim, dtype=torch.float)
                 self.dropout_layer = torch.nn.Dropout()
@@ -235,17 +266,17 @@ class scCLIP(BaseCellModel):
                     nn.Linear(self.emb_dim, 128),
                     nn.LayerNorm(128),
                     nn.ELU(),
-                    nn.Linear(128, self.n_mod1),
+                    nn.Linear(128, self.n_mod1_output),
                     nn.ReLU()
                 )
                 self.mod2_decoder = nn.Sequential(
                     nn.Linear(self.emb_dim, 128),
                     nn.LayerNorm(128),
                     nn.ELU(),
-                    nn.Linear(128, self.n_mod2),
+                    nn.Linear(128, self.n_mod2_output),
                     nn.Sigmoid()  # Directly predict binary
                 )
-        self.mod1_dispersion = nn.Parameter(torch.rand(self.n_mod1))
+        self.mod1_dispersion = nn.Parameter(torch.rand(self.n_mod1_output))
 
     def new_decode(
         self,
@@ -262,10 +293,10 @@ class scCLIP(BaseCellModel):
         mod2_reconstruct = self.mod2_decoder(combined_features)
 
         # Adjust RNA counts for library size
-        if self.library_size_nn_1:
-            x_library_size = torch.cat([counts_1, library_size_1], -1)
-            library_size_1 = self.library_size_nn_1(x_library_size).exp()
-        mod1_reconstruct_means = mod1_reconstruct * library_size_1
+        # if self.library_size_nn_1:
+        #     x_library_size = torch.cat([counts_1, library_size_1], -1)
+        #     library_size_1 = self.library_size_nn_1(x_library_size).exp()
+        # mod1_reconstruct_means = mod1_reconstruct * library_size_1
 
         # Don't need to adjust ATAC for libary size as they are binarized
 
@@ -273,7 +304,7 @@ class scCLIP(BaseCellModel):
         mod1_dispersion = self.mod1_dispersion.exp()  # Take exponent to avoid <= 0 dispersions
 
         # Since this is a probability, need to take negative for loss.
-        mod1_log_px = log_nb_positive(counts_1, mod1_reconstruct_means, mod1_dispersion)
+        mod1_log_px = log_nb_positive(counts_1, mod1_reconstruct, mod1_dispersion)
 
         # F.binary_cross_entropy parameters
         # - input: tensor of arbitrary shape as probabilities
@@ -283,9 +314,11 @@ class scCLIP(BaseCellModel):
         # mod2_log_px = (-mod2_reconstruct * counts_2).sum(-1)
 
         return {
-            'mod1_reconstruct': mod1_reconstruct_means,
+            'mod1_reconstruct': mod1_reconstruct,
             'mod2_reconstruct': mod2_reconstruct,
-            'nll': mod1_log_px / self.n_mod1 - self.beta * mod2_log_px / self.n_mod2
+            'nll': mod1_log_px / self.n_mod1_output - self.beta * mod2_log_px / self.n_mod2_output,
+            'nb': mod1_log_px.mean() / self.n_mod1_output,
+            'bernoulli': mod2_log_px.mean() / self.n_mod2_output
         }
 
     def combine_features(
@@ -301,7 +334,7 @@ class scCLIP(BaseCellModel):
             averaged = (mod1_features + mod2_features) / 2
             return averaged / torch.norm(averaged, p=2, dim=-1, keepdim=True)
         elif self.combine_method == 'dropout':
-            mod1_indices = self.dropout_layer(self.emb_indices) / 2  # Undo the correction that nn.Dropout does
+            mod1_indices = self.dropout_layer(self.emb_indices)
             mod1_indices = mod1_indices.long()
             mod1_features[:, mod1_indices == 0] = 0
             mod2_features[:, mod1_indices != 0] = 0
@@ -329,6 +362,7 @@ class scCLIP(BaseCellModel):
         mod2_features = self.mod2_encoder(mod2_input)
 
         # L2 normalization
+        # TODO: See what happens if no normalization occurs; can contrastive be used without normalization?
         mod1_features = F.normalize(mod1_features)
         mod2_features = F.normalize(mod2_features)
 
@@ -337,10 +371,13 @@ class scCLIP(BaseCellModel):
         mu = self.mean_encoder(combined_features)
         mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
         var = self.var_encoder(combined_features)
-        var = nn.Softplus()(var)
-    
+        var = nn.Softplus()(var) + 1e-5
+
         z_dist = PowerSpherical(mu, var.squeeze(-1))
-        z = z_dist.rsample()
+        if self.training:
+            z = z_dist.rsample()
+        else:
+            z = mu
 
         if self.decode_features and hyper_param_dict.get("reconstruct_weight", 1):
             # If decoding is turned on and the reconstruction holds any weight in this procedure.
@@ -364,11 +401,17 @@ class scCLIP(BaseCellModel):
             log_px_zl = decode_dict['nll'] * hyper_param_dict.get("reconstruct_weight", 1)
         else:
             log_px_zl = 0
-        
+
+        if self.cap_temperature is not None:
+            logit_scale = torch.clamp(self.logit_scale.exp(), max=self.cap_temperature)
+        else:
+            logit_scale = self.logit_scale.exp()
+
         fwd_dict = {
             "mod1_features": mod1_features,
             "mod2_features": mod2_features,
-            "logit_scale": self.logit_scale.exp(),
+            "joint_features": mu,
+            "temp": logit_scale,
             "log_px_zl": log_px_zl.mean()
         }
         if self.decode_features and hyper_param_dict.get("reconstruct_weight", 1):
@@ -378,31 +421,53 @@ class scCLIP(BaseCellModel):
 
         if not self.training:
             return fwd_dict
-
-        if self.loss_method == 'clip' and hyper_param_dict.get("contrastive_weight", 1):
-            contrastive_loss = self.loss(mod1_features, mod2_features, self.logit_scale) * hyper_param_dict.get("contrastive_weight", 1)
+        if 'use_contrastive' in hyper_param_dict:
+            if hyper_param_dict['use_contrastive']:
+                contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
+            else:
+                # fwd_dict['use_dist'] == 1
+                contrastive_loss = self.dist_loss(mod1_features, mod2_features) / self.loss_ratio
+        elif self.loss_method == 'clip_dist':
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale) + self.dist_loss(mod1_features, mod2_features) / self.loss_ratio
+        elif self.loss_method == 'clip' and hyper_param_dict.get("contrastive_weight", 1):
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale) * hyper_param_dict.get("contrastive_weight", 1)
             fwd_dict['contrastive'] = contrastive_loss
             # print("CONTRASTIVE", loss - log_px_zl)
-        elif self.loss_method == 'clip':
+        elif self.loss_method == 'clip':    
             contrastive_loss = 0
-        elif self.loss_method == 'cosine':
-            contrastive_loss = self.loss(mod1_features, mod2_features, torch.ones((mod1_features.shape[0],)))
+        # elif self.loss_method == 'cosine':
+        #     contrastive_loss = self.loss(mod1_features, mod2_features, torch.ones((mod1_features.shape[0],)))
         else:
-            contrastive_loss = self.loss(mod1_features, mod2_features) / self.loss_ratio
+            contrastive_loss = self.dist_loss(mod1_features, mod2_features) / self.loss_ratio
+        fwd_dict['contrastive'] = contrastive_loss
 
-        log_pz = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device).log_prob(z)
-        log_qz_x = PowerSpherical(mu, var.squeeze(-1)).log_prob(z)
-        log_ratio = log_px_zl + log_pz - log_qz_x
+        if self.discriminative:
+            mod1_preds = self.discriminator(mod1_features)
+            mod2_preds = self.discriminator(mod2_features)
+            truth = torch.cat([torch.zeros(mod1_features.shape[0]), torch.ones(mod2_features.shape[0])])
+            discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
+            fwd_dict['discriminative'] = discriminative_loss
+
+        # log_pz = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device).log_prob(z)
+        # log_qz_x = PowerSpherical(mu, var.squeeze(-1)).log_prob(z)
+        uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
+        ps = PowerSpherical(mu, var.squeeze(-1))
+        kl = _kl_powerspherical_uniform(ps, uni)
+        # log_ratio = log_px_zl + log_pz - log_qz_x
+        log_ratio = log_px_zl + kl
         obj = -log_ratio.mean(0)
-        fwd_dict['obj'] = obj
+        # fwd_dict['KL'] = (log_pz - log_qz_x).mean()
+        fwd_dict['KL'] = kl.mean()
 
-        # print('log_px_zl', fwd_dict['log_px_zl'])
-        # print('log_pz', log_pz.mean())
-        # print('log_qz_x', log_qz_x.mean())
-        # print('contrastive', contrastive_loss)
         loss = obj + contrastive_loss
 
-        record = dict(loss=loss)
+        record = dict(
+            loss=loss, contrastive=fwd_dict['contrastive'], KL=fwd_dict['KL'],
+            nb=-fwd_dict['nb'], bernoulli=-fwd_dict['bernoulli'], temp=fwd_dict['temp']
+        )
+        if self.discriminative:
+            record['discriminative'] = fwd_dict['discriminative']
+        # print(record)
         record = {k: v.detach().item() for k, v in record.items()}
         return loss, fwd_dict, record
     
@@ -413,6 +478,8 @@ class scCLIP(BaseCellModel):
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
+        transformed_layer=None,
+        transformed_obsm=None,
         inplace: bool = True
     ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
         """
@@ -444,7 +511,13 @@ class scCLIP(BaseCellModel):
             if nlls is not None:
                 nlls.append(fwd_dict['nll'].detach().item())
 
-        self._apply_to(adata_1, adata_2, batch_col, batch_size, hyper_param_dict, callback=store_emb_and_nll)
+        self._apply_to(
+            adata_1, adata_2, batch_col, batch_size,
+            transformed_layer=transformed_layer,
+            transformed_obsm=transformed_obsm,
+            hyper_param_dict=hyper_param_dict,
+            callback=store_emb_and_nll
+        )
 
         embs = {name: torch.cat(embs[name], dim=0).numpy() for name in emb_names}
         if nlls is not None:
@@ -464,18 +537,154 @@ class scCLIP(BaseCellModel):
         adata_2: anndata.AnnData,
         batch_col: str = 'batch_indices',
         batch_size: int = 2000,
+        transformed_layer=None,
+        transformed_obsm=None,
         hyper_param_dict: Union[dict, None] = None,
         callback: Union[Callable, None] = None
     ) -> None:
         """Docstring (TODO)
         """
-        sampler = CellSampler(adata_1, adata_2, batch_size=batch_size, sample_batch_id=self.need_batch, n_epochs=1, batch_col=batch_col, shuffle=False)
+        use_hvar = self.n_mod1_output != self.n_mod1
+        sampler = CellSampler(
+            adata_1, adata_2, use_highly_variable=use_hvar,
+            decode_highly_variable=self.decode_hvar,
+            transformed_layer=transformed_layer,
+            transformed_obsm=transformed_obsm,
+            batch_size=batch_size, sample_batch_id=self.need_batch,
+            n_epochs=1, batch_col=batch_col, shuffle=False
+        )
         self.eval()
         for data_dict in sampler:
             data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
             fwd_dict = self(data_dict, hyper_param_dict=hyper_param_dict)
             if callback is not None:
                 callback(data_dict, fwd_dict)
+
+    def _pred_mod1_mod2_forward(self,
+        data_dict: Mapping[str, torch.Tensor],
+        hyper_param_dict: Mapping[str, Any] = dict()
+    ) -> Mapping[str, Any]:
+        """
+        Forward from mod1 to mod2
+        """
+        mod1_input = data_dict["cells_1_transformed"]
+        mod1_features = self.mod1_encoder(mod1_input)
+        mod1_features = F.normalize(mod1_features)
+        mu = self.mean_encoder(mod1_features)
+        mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
+
+        mod1_reconstruct = self.mod1_decoder(mu)
+        mod2_reconstruct = self.mod2_decoder(mu)
+
+        fwd_dict = dict(
+            mod1_features=mod1_features,
+            mu=mu,
+            mod1_reconstruct=mod1_reconstruct,
+            mod2_reconstruct=mod2_reconstruct
+        )
+        return fwd_dict
+
+    def _pred_mod2_mod1_forward(self,
+        data_dict: Mapping[str, torch.Tensor],
+        hyper_param_dict: Mapping[str, Any] = dict()
+    ) -> Mapping[str, Any]:
+        """
+        Forward from mod1 to mod2
+        """
+        mod2_input = data_dict["cells_2_transformed"]
+        mod2_features = self.mod2_encoder(mod2_input)
+        mod2_features = F.normalize(mod2_features)
+        mu = self.mean_encoder(mod2_features)
+        mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
+
+        mod1_reconstruct = self.mod1_decoder(mu)
+        mod2_reconstruct = self.mod2_decoder(mu)
+
+        fwd_dict = dict(
+            mod2_features=mod2_features,
+            mu=mu,
+            mod1_reconstruct=mod1_reconstruct,
+            mod2_reconstruct=mod2_reconstruct
+        )
+        return fwd_dict
+
+    def pred_mod1_to_mod2(self,
+        adata_1: anndata.AnnData,
+        batch_size: int = 2000,
+        batch_col: str = 'batch_indices',
+        inplace: bool = True,
+    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
+        """
+        Predict from modality 1 to modality 2.
+        """
+        hyper_param_dict = dict(decode=True, reconstruct_weight=1)
+        use_hvar = self.n_mod1_input != self.n_mod1
+        sampler = CellSampler(
+            adata_1,
+            adata_1,  # We will ignore the second modality
+            use_highly_variable=use_hvar,
+            decode_highly_variable=self.decode_hvar,
+            batch_size=batch_size,
+            sample_batch_id=self.need_batch,
+            n_epochs=1,
+            batch_col=batch_col,
+            shuffle=False
+        )
+
+        self.eval()
+        embs = {'mod1_pred': [], 'mod2_pred': []}
+        for data_dict in sampler:
+            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
+            fwd_dict = self._pred_mod1_mod2_forward(data_dict, hyper_param_dict)
+            embs['mod1_pred'].append(fwd_dict['mod1_reconstruct'].detach().cpu())
+            embs['mod2_pred'].append(fwd_dict['mod2_reconstruct'].detach().cpu())
+        
+        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in ['mod1_pred', 'mod2_pred']}
+
+        if inplace:
+            adata_1.obsm.update(embs)
+            return None
+        else:
+            return embs
+
+    def pred_mod2_to_mod1(self,
+        adata_2: anndata.AnnData,
+        batch_size: int = 2000,
+        batch_col: str = 'batch_indices',
+        inplace: bool = True,
+    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
+        """
+        Predict from modality 2 to modality 1
+        """
+        hyper_param_dict = dict(decode=True, reconstruct_weight=1)
+        use_hvar = self.n_mod2_input != self.n_mod2
+        sampler = CellSampler(
+            adata_2,
+            adata_2,  # We will ignore the second modality
+            use_highly_variable=use_hvar,
+            decode_highly_variable=self.decode_hvar,
+            batch_size=batch_size,
+            sample_batch_id=self.need_batch,
+            n_epochs=1,
+            batch_col=batch_col,
+            shuffle=False
+        )
+
+        self.eval()
+        embs = {'mod1_pred': [], 'mod2_pred': []}
+        for data_dict in sampler:
+            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
+            fwd_dict = self._pred_mod2_mod1_forward(data_dict, hyper_param_dict)
+            embs['mod1_pred'].append(fwd_dict['mod1_reconstruct'].detach().cpu())
+            embs['mod2_pred'].append(fwd_dict['mod2_reconstruct'].detach().cpu())
+        
+        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in ['mod1_pred', 'mod2_pred']}
+
+        if inplace:
+            adata_2.obsm.update(embs)
+            return None
+        else:
+            return embs
 
 
 class HypersphericalUniform(torch.distributions.Distribution):

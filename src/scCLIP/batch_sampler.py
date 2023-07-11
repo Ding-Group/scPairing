@@ -40,6 +40,9 @@ class CellSampler():
         batch_size: int,
         raw_layer: Optional[Union[str, List[str]]] = None,
         transformed_layer: Optional[Union[str, List[str]]] = None,
+        transformed_obsm: Optional[Union[str, List[str]]] = None,
+        use_highly_variable: bool = False,
+        decode_highly_variable: bool = False,
         sample_batch_id: bool = False,
         n_epochs: Union[float, int] = np.inf,
         rng: Union[None, np.random.Generator] = None,
@@ -57,6 +60,9 @@ class CellSampler():
                 the first will be applied to adata_1, second applied to adata_2
             transformed_layer: AnnData layer corresponding to transformed counts.
                 Same premise as raw_layer.
+            transformed_obsm: AnnData obsm key corresponding to transformed data.
+            use_highly_variable: whether to only use the highly variable genes within the AnnData object
+            decode_highly_variable: whether to only use the highly variable genes in the decoder inputs
             sample_batch_id: whether to yield batch indices in each sample.
             n_epochs: number of epochs to sample before raising StopIteration.
             rng: the random number generator.
@@ -69,17 +75,27 @@ class CellSampler():
         Assumption that adata_1 and adata_2 have the same cells in the same order.
         """
         assert adata_1.n_obs == adata_2.n_obs, "The two AnnData objects have a different number of observations"
+        assert transformed_obsm is None or transformed_layer is None
         self.n_cells: int = adata_1.n_obs
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
 
         if isinstance(raw_layer, str) or raw_layer is None:
             raw_layer = [raw_layer, raw_layer]
-        if isinstance(transformed_layer, str) or transformed_layer is None:
-            transformed_layer = [transformed_layer, transformed_layer]
-        
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer[0]] if raw_layer[0] else adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer[1]] if raw_layer[1] else adata_2.X
+        # if isinstance(transformed_layer, str) or transformed_layer is None:
+        #     transformed_layer = [transformed_layer, transformed_layer]
+
+        self.use_highly_variable = use_highly_variable
+        self.decode_highly_variable = decode_highly_variable
+        if self.decode_highly_variable:
+            hvar_X_1 = adata_1[:, adata_1.var.highly_variable]
+            hvar_X_2 = adata_2[:, adata_2.var.highly_variable]
+        else:
+            hvar_X_1 = adata_1
+            hvar_X_2 = adata_2
+
+        self.X_1: Union[np.ndarray, spmatrix] = hvar_X_1.layers[raw_layer[0]] if raw_layer[0] else hvar_X_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = hvar_X_2.layers[raw_layer[1]] if raw_layer[1] else hvar_X_2.X
 
         self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
         self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
@@ -98,8 +114,26 @@ class CellSampler():
         else:
             self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1, keepdims=True)
 
-        self.X_1_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer[0]] if transformed_layer[0] else adata_1.X
-        self.X_2_transformed: Union[np.ndarray, spmatrix] = adata_1.layers[transformed_layer[1]] if transformed_layer[1] else adata_2.X
+        if self.use_highly_variable:
+            hvar_X_1 = adata_1[:, adata_1.var.highly_variable]
+            hvar_X_2 = adata_2[:, adata_2.var.highly_variable]
+        else:
+            hvar_X_1 = adata_1
+            hvar_X_2 = adata_2
+
+        if transformed_layer is not None:
+            if isinstance(transformed_layer, str):
+                transformed_layer = [transformed_layer, transformed_layer]
+            self.X_1_transformed = hvar_X_1.layers[transformed_layer[0]] if transformed_layer[0] else hvar_X_1.X
+            self.X_2_transformed = hvar_X_2.layers[transformed_layer[1]] if transformed_layer[1] else hvar_X_2.X
+        elif transformed_obsm is not None:
+            if isinstance(transformed_obsm, str):
+                transformed_obsm = [transformed_obsm, transformed_obsm]
+            self.X_1_transformed = hvar_X_1.obsm[transformed_obsm[0]] if transformed_obsm[0] else hvar_X_1.X
+            self.X_2_transformed = hvar_X_2.obsm[transformed_obsm[1]] if transformed_obsm[1] else hvar_X_2.X
+        else:
+            self.X_1_transformed = hvar_X_1.X
+            self.X_2_transformed = hvar_X_2.X
 
         self.sample_batch_id: bool = sample_batch_id
         if self.sample_batch_id:
@@ -193,17 +227,21 @@ class CellSampler():
             X_1_transformed = self.X_1_transformed[batch, :]
             X_2_transformed = self.X_2_transformed[batch, :]
 
-            if self.is_sparse_1:
+            if isinstance(X_1, spmatrix):
                 cells_1 = torch.FloatTensor(X_1.todense())
-                X_1_transformed = torch.FloatTensor(X_1_transformed.todense())
             else:
                 cells_1 = torch.FloatTensor(X_1)
+            if isinstance(X_1_transformed, spmatrix):
+                X_1_transformed = torch.FloatTensor(X_1_transformed.todense())
+            else:
                 X_1_transformed = torch.FloatTensor(X_1_transformed)
-            if self.is_sparse_2:
+            if isinstance(X_2, spmatrix):
                 cells_2 = torch.FloatTensor(X_2.todense())
-                X_2_transformed = torch.FloatTensor(X_2_transformed.todense())
             else:
                 cells_2 = torch.FloatTensor(X_2)
+            if isinstance(X_2_transformed, spmatrix):
+                X_2_transformed = torch.FloatTensor(X_2_transformed.todense())
+            else:
                 X_2_transformed = torch.FloatTensor(X_2_transformed)
 
             cell_indices = torch.LongTensor(batch)

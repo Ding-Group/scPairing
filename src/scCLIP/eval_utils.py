@@ -18,9 +18,10 @@ from sklearn.neighbors import NearestNeighbors
 from logging_utils import log_arguments
 import psutil
 
-_cpu_count: Union[None, int] = psutil.cpu_count(logical=False)
-if _cpu_count is None:
-    _cpu_count: int = psutil.cpu_count(logical=True)
+# _cpu_count: Union[None, int] = psutil.cpu_count(logical=False)
+# if _cpu_count is None:
+#     _cpu_count: int = psutil.cpu_count(logical=True)
+_cpu_count = 1
 _logger = logging.getLogger(__name__)
 
 

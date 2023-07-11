@@ -68,12 +68,17 @@ class UnsupervisedTrainer:
         adata_2: anndata.AnnData,
         raw_layer: Optional[Union[str, List[str]]] = None,
         transformed_layer: Optional[Union[str, List[str]]] = None,
+        transformed_obsm: Optional[Union[str, List[str]]] = None,
         ckpt_dir: Union[str, None] = None,
         test_ratio: float = 0.,
         data_split_seed: int = 1,
         init_lr: float = 5e-3,
         lr_decay: float = 6e-5,
+        weight_decay: float = 0.,
+        logit_weight_decay: float = 0.,
         batch_size: int = 2000,
+        use_highly_variable: bool = False,
+        decode_highly_variable: bool = False,
         train_instance_name: str = "scCLIP",
         restore_epoch: int = 0,
         seed: int = -1,
@@ -86,6 +91,7 @@ class UnsupervisedTrainer:
             adata_2: the intact single-cell dataset (second modality).
             raw_layer: layer corresponding to raw counts.
             transformed_layer: layer corresponding to transformed counts.
+            transformed_obsm: key in obsm corresponding to transformed data.
             ckpt_dir: directory to store the logs, the checkpoints and the
                 plots. If training from scratch (restore_epoch = 0), this would
                 be the parent directory of the actual directory storing the
@@ -114,8 +120,23 @@ class UnsupervisedTrainer:
                 train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
         
         self.raw_layer = raw_layer
+
+        assert not (transformed_layer is not None and transformed_obsm is not None), "Only one of transformed_layer and transformed_obsm should be given"
         self.transformed_layer = transformed_layer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=init_lr)
+        self.transformed_obsm = transformed_obsm
+        self.use_highly_variable = use_highly_variable
+        self.decode_highly_variable = decode_highly_variable
+        self.optimizer = optim.Adam([
+                {'params': model.mod1_encoder.parameters()},
+                {'params': model.mod2_encoder.parameters()},
+                {'params': model.mean_encoder.parameters()},
+                {'params': model.var_encoder.parameters()},
+                {'params': model.logit_scale, 'weight_decay': logit_weight_decay},
+                {'params': model.mod1_decoder.parameters(), 'weight_decay': weight_decay},
+                {'params': model.mod2_decoder.parameters(), 'weight_decay': weight_decay}
+            ],
+            lr=init_lr,
+        )
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
@@ -244,9 +265,11 @@ class UnsupervisedTrainer:
         min_reconstruct_weight: float = 0.,
         max_reconstruct_weight: float = 0.5,
         flip_contrastive_reconstruct: float = 0,
+        flip_clip_dist: float = 0,
         eval: bool = True,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
+        ping_every: Optional[int] = None,
         record_log_path: Union[str, None] = None,
         writer: Union[None, SummaryWriter] = None,
         eval_result_log_path: Union[str, None] = None,
@@ -281,6 +304,8 @@ class UnsupervisedTrainer:
             max_reconstruct_weight: maximum weight of reconstruction term
             flip_contrastive_reconstruct: proportion of epochs at which to switch from
                 training using contrastive loss to using reconstructive loss
+            flip_clip_dist: proporition of epochs at which to switch from training using
+                clip loss to distance-based loss.
         """
 
         default_eval_kwargs = dict(
@@ -292,6 +317,9 @@ class UnsupervisedTrainer:
         if eval_kwargs is not None:
             default_eval_kwargs.update(eval_kwargs)
         eval_kwargs = default_eval_kwargs
+
+        if ping_every is None:
+            ping_every = n_epochs
         
         # set up sampler and dataloader
         # if n_samplers == 1 or self.batch_size >= self.train_adata_1.n_obs:
@@ -301,6 +329,9 @@ class UnsupervisedTrainer:
             self.batch_size,
             raw_layer=self.raw_layer,
             transformed_layer=self.transformed_layer,
+            transformed_obsm=self.transformed_obsm,
+            use_highly_variable=self.use_highly_variable,
+            decode_highly_variable=self.decode_highly_variable,
             sample_batch_id=self.model.need_batch,
             n_epochs=n_epochs - self.epoch,
             batch_col=batch_col
@@ -310,8 +341,17 @@ class UnsupervisedTrainer:
         dataloader = iter(sampler)
         
         # set up the stats recorder
+        if os.path.exists(os.path.join(self.ckpt_dir, 'stats.csv')):
+            log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
+        else:
+            log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
+            log_file.write("Epoch,Contrastive,obj,nb,bernoulli,temp\n")
         recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
+        next_ping_epoch = min(int(np.ceil(self.epoch / ping_every) * ping_every), n_epochs)
+
+        with open(os.path.join(self.ckpt_dir, 'device.txt'), 'w') as f:
+            f.write(str(self.model.device))
 
         while self.epoch < n_epochs:
             # Train one epoch
@@ -322,8 +362,10 @@ class UnsupervisedTrainer:
                 min_reconstruct_weight=min_reconstruct_weight,
                 max_reconstruct_weight=max_reconstruct_weight,
                 flip_contrastive_reconstruct=flip_contrastive_reconstruct,
+                flip_clip_dist=flip_clip_dist,
                 **train_kwargs
             )
+            log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["nb"]},{new_record["bernoulli"]},{new_record["temp"]}\n')
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
 
@@ -332,7 +374,7 @@ class UnsupervisedTrainer:
                 _logger.info('=' * 10 + f'Epoch {next_ckpt_epoch:.0f}' + '=' * 10)
 
                 # log memory cost
-                _logger.info(repr(psutil.Process().memory_info()))
+                # _logger.info(repr(psutil.Process().memory_info()))
                 # log current lr and kl_weight
                 if self.lr_decay:
                     _logger.info(f'{"lr":12s}: {self.lr:12.4g}')
@@ -366,6 +408,12 @@ class UnsupervisedTrainer:
                 _logger.info('=' * 10 + f'End of evaluation' + '=' * 10)
                 next_ckpt_epoch = min(eval_every + next_ckpt_epoch, n_epochs)
 
+            if self.epoch >= next_ping_epoch:
+                with open(os.path.join(self.ckpt_dir, 'ping.txt'), 'w') as f:
+                    f.write(str(self.epoch))
+                next_ping_epoch = ping_every + next_ping_epoch
+
+        log_file.close()
         del recorder
         _logger.info("Optimization Finished: %s" % self.ckpt_dir)
         # if isinstance(sampler, MultithreadedCellSampler):
@@ -420,6 +468,11 @@ class UnsupervisedTrainer:
             hyper_param_dict['reconstruct_weight'], hyper_param_dict['contrastive_weight'] = self._calc_cutoff(
                 self.epoch, kwargs['n_epochs'], kwargs['flip_contrastive_reconstruct']
             )
+        
+        if kwargs['flip_clip_dist']:
+            hyper_param_dict['use_dist'], hyper_param_dict['use_contrastive'] = self._calc_cutoff(
+                self.epoch, kwargs['n_epochs'], kwargs['flip_clip_dist']
+            )
 
         # construct data_dict
         data_dict = {k: v.to(self.device) for k, v in next(dataloader).items()}
@@ -433,5 +486,10 @@ class UnsupervisedTrainer:
         """Docstring (TODO)
         """
 
-        self.model.get_cell_embeddings_and_nll(self.adata_1, self.adata_2, self.batch_size, batch_col=batch_col, emb_names=self.model.emb_names)
+        self.model.get_cell_embeddings_and_nll(
+            self.adata_1, self.adata_2, self.batch_size,
+            transformed_layer=self.transformed_layer,
+            transformed_obsm=self.transformed_obsm,
+            batch_col=batch_col, emb_names=self.model.emb_names
+        )
 
