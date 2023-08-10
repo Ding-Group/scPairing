@@ -539,7 +539,7 @@ class scCLIP(BaseCellModel):
             # ps = PowerSpherical(mu, var.squeeze(-1))
             kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
             fwd_dict['KL'] = kl.mean()
-            loss -= kl.mean()
+            loss += kl.mean()
         else:
             fwd_dict['KL'] = torch.zeros([])
 
