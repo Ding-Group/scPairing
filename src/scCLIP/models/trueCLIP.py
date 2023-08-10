@@ -248,14 +248,14 @@ class scCLIP(BaseCellModel):
         # Encoder networks
         self.mod1_encoder = get_fully_connected_layers(
             self.n_mod1_input,
-            self.emb_dim,
+            self.emb_dim + 1,
             self.hidden_dims,
             bn=self.bn,
             dropout_prob=self.dropout
         )
         self.mod2_encoder = get_fully_connected_layers(
             self.n_mod2_input,
-            self.emb_dim,
+            self.emb_dim + 1,
             self.hidden_dims,
             bn=self.bn,
             dropout_prob=self.dropout
@@ -440,23 +440,39 @@ class scCLIP(BaseCellModel):
         mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
 
+        mod1_mu, mod1_var = mod1_features[:, :self.emb_dim], mod1_features[:, self.emb_dim:]
+        mod2_mu, mod2_var = mod2_features[:, :self.emb_dim], mod2_features[:, self.emb_dim:]
+
         # L2 normalization
-        mod1_features = F.normalize(mod1_features)
-        mod2_features = F.normalize(mod2_features)
+        mod1_features = F.normalize(mod1_mu)
+        mod2_features = F.normalize(mod2_mu)
 
         if self.variational and self.decode_features:
-            combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
+            # combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
 
-            mu = self.mean_encoder(combined_features)
-            mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
-            var = self.var_encoder(combined_features)  # Going to nan for some reason
-            var = nn.Softplus()(var) + 1e-5
+            # mu = self.mean_encoder(combined_features)
+            # mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
+            # var = self.var_encoder(combined_features)  # Going to nan for some reason
+            # var = nn.Softplus()(var) + 1e-5
 
-            z_dist = PowerSpherical(mu, var.squeeze(-1))
+            # z_dist = PowerSpherical(mu, var.squeeze(-1))
+            # if self.training:
+            #     z = z_dist.rsample()
+            # else:
+            #     z = mu
             if self.training:
-                z = z_dist.rsample()
+                mod1_var = nn.Softplus()(mod1_var) + 1e-5
+                mod2_var = nn.Softplus()(mod2_var) + 1e-5
+                mod1_z_dist = PowerSpherical(mod1_features, mod1_var.squeeze(-1))
+                mod2_z_dist = PowerSpherical(mod2_features, mod2_var.squeeze(-1))
+
+                mod1_z = mod1_z_dist.rsample()
+                mod2_z = mod2_z_dist.rsample()
             else:
-                z = mu
+                mod1_z, mod2_z = mod1_features, mod2_features
+            
+            z = self.combine_features(mod1_z.clone(), mod2_z.clone())
+            z = F.normalize(z)
 
         if self.decode_features:
             if self.variational:
@@ -489,7 +505,7 @@ class scCLIP(BaseCellModel):
         }
         
         if self.variational:
-            fwd_dict['combined_features'] = combined_features
+            fwd_dict['combined_features'] = z
         if self.decode_features:
             fwd_dict['mod1_reconstruct'] = mod1_dict['mod1_reconstruct']
             fwd_dict['mod2_reconstruct'] = mod2_dict['mod2_reconstruct']
@@ -520,8 +536,8 @@ class scCLIP(BaseCellModel):
 
         if self.variational and self.decode_features:
             uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
-            ps = PowerSpherical(mu, var.squeeze(-1))
-            kl = _kl_powerspherical_uniform(ps, uni)
+            # ps = PowerSpherical(mu, var.squeeze(-1))
+            kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
             fwd_dict['KL'] = kl.mean()
             loss -= kl.mean()
         else:
@@ -556,10 +572,14 @@ class scCLIP(BaseCellModel):
 
         mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
+        mod1_mu, _ = mod1_features[:, :self.emb_dim], mod1_features[:, self.emb_dim:]
+        mod2_mu, _ = mod2_features[:, :self.emb_dim], mod2_features[:, self.emb_dim:]
 
         # L2 normalization
-        mod1_features = F.normalize(mod1_features)
-        mod2_features = F.normalize(mod2_features)
+        mod1_features = F.normalize(mod1_mu)
+        mod2_features = F.normalize(mod2_mu)
+        # mod1_features = F.normalize(mod1_features)
+        # mod2_features = F.normalize(mod2_features)
 
         mod1_preds = self.discriminator(mod1_features)
         mod2_preds = self.discriminator(mod2_features)
