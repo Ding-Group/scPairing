@@ -360,7 +360,7 @@ class scCLIP(BaseCellModel):
             mod1_reconstruct = F.softmax(approx_mod1_features, dim=1) * library_size
             loss = -log_nb_positive(counts, mod1_reconstruct, self.mod1_dispersion.exp()).mean() / self.n_mod1_output if not is_imputation else None
         else:
-            mod1_reconstruct, loss = self.reconstruct_mod1_fn(approx_mod1_features, mod1_embs, counts, library_size, cell_indices, self.training, False, batch_indices)
+            mod1_reconstruct, loss = self.reconstruct_mod1_fn(approx_mod1_features, mod1_embs, counts, library_size, cell_indices, self.training, is_imputation, batch_indices)
         return {
             'mod1_reconstruct': mod1_reconstruct,
             'nll': loss
@@ -388,7 +388,7 @@ class scCLIP(BaseCellModel):
                 mod2_reconstruct = F.relu(approx_mod2_features)
                 loss = -log_nb_positive(counts, mod2_reconstruct, self.mod2_dispersion.exp()).mean() / self.n_mod2_output if not is_imputation else None
         else:
-            mod2_reconstruct, loss = self.reconstruct_mod2_fn(approx_mod2_features, mod2_embs, counts, library_size, cell_indices, self.training, False, batch_indices)
+            mod2_reconstruct, loss = self.reconstruct_mod2_fn(approx_mod2_features, mod2_embs, counts, library_size, cell_indices, self.training, is_imputation, batch_indices)
         return {
             'mod2_reconstruct': mod2_reconstruct,
             'nll': loss
@@ -539,7 +539,7 @@ class scCLIP(BaseCellModel):
             # ps = PowerSpherical(mu, var.squeeze(-1))
             kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
             fwd_dict['KL'] = kl.mean()
-            loss += kl.mean()
+            loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
         else:
             fwd_dict['KL'] = torch.zeros([])
 
@@ -692,11 +692,7 @@ class scCLIP(BaseCellModel):
         batch_indices = data_dict.get('batch_indices', None)
         mod1_features = self.mod1_encoder(mod1_input)
         mod1_features = F.normalize(mod1_features)
-        if self.variational:
-            mu = self.mean_encoder(mod1_features)
-            mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
-        else:
-            mu = mod1_features
+        mu = mod1_features[:, :self.emb_dim]
 
         mod2_reconstruct = self.decode_mod2(mu, None, None, None, None, batch_indices, True)
 
@@ -718,11 +714,7 @@ class scCLIP(BaseCellModel):
         batch_indices = data_dict.get('batch_indices', None)
         mod2_features = self.mod2_encoder(mod2_input)
         mod2_features = F.normalize(mod2_features)
-        if self.variational:
-            mu = self.mean_encoder(mod2_features)
-            mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
-        else:
-            mu = mod2_features
+        mu = mod2_features[:, :self.emb_dim]
 
         mod1_reconstruct = self.decode_mod1(mu, None, None, None, None, batch_indices, True)
         # mod2_reconstruct = self.mod2_decoder(mu)
