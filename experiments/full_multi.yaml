@@ -1,0 +1,33 @@
+files:
+  mod1:
+    - /arc/project/st-jiaruid-1/yinian/multiome/complete_multi_targets.h5ad
+  mod2:
+    - /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/complete_multi_input/pvi_dim_50_2.h5ad
+model_params:
+  emb_dim: 10
+  hidden_dims:
+    - 128
+  decode_features: True
+  decode_method: dropout
+  cell_dropout: False
+  modality_discriminative: True
+  variational: True
+  distance_loss: False
+  loss_method: clip
+  cap_temperature: 50
+trainer_params:
+  n_epochs: 300
+  eval_every: 300
+  ping_every: 100
+  raw_layer:
+    - None
+    - binary
+  transformed_layer:
+  transformed_obsm:
+    - X_scVI
+    - X_PeakVI
+  weight_decay: 0
+  batch_size: 2000
+cell_type_col: cell_type
+reconstruct: True
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse_skin_v2/

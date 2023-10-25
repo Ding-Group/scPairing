@@ -87,6 +87,7 @@ def main(config):
     trainer.train(
         n_epochs=trainer_params['n_epochs'],
         eval_every=trainer_params['eval_every'],
+        batch_col=batch_col,
         ping_every=trainer_params.get('ping_every', None),
         eval_kwargs=dict(cell_type_col=config['cell_type_col']),
         n_samplers=1,

@@ -1,18 +1,20 @@
 files:
   mod1:
-    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_brain_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_tac_rna.h5ad
   mod2:
-    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_brain_atac.h5ad
+    - /arc/project/st-jiaruid-1/yinian/shareseq/mouse_tac_atac.h5ad
 model_params:
   emb_dim: 10
   hidden_dims:
     - 128
   decode_features: True
   decode_method: dropout
-  discriminative: False
+  modality_discriminative: True
+  variational: True
   loss_method: debiased
+  cap_temperature: 50
 trainer_params:
-  n_epochs: 1200
+  n_epochs: 100
   eval_every: 300
   ping_every: 100
   raw_layer:
@@ -22,8 +24,8 @@ trainer_params:
   transformed_obsm:
     - X_pca
     - X_lsi
-  batch_size: 4000
   weight_decay: 0.001
+  batch_size: 5000
 cell_type_col: celltype
 reconstruct: True
-ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse-brain/
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/mouse_skin/

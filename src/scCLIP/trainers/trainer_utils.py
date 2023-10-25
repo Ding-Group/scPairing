@@ -10,9 +10,9 @@ import numpy as np
 import anndata
 import torch
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 
-from models import scETM
+# from models import scETM
 from logging_utils import log_arguments
 
 _logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ class _stats_recorder:
     def __init__(self,
         record_log_path: Union[str, None] = None,
         fmt: str = "10.4g",
-        writer: Union[None, SummaryWriter] = None,
-        metadata: Union[None, pd.DataFrame] = None
+        writer = None,
+        metadata = None
     ) -> None:
         """Initializes the statistics recorder.
         
@@ -46,7 +46,7 @@ class _stats_recorder:
         self.record: DefaultDict[List] = defaultdict(list)
         self.fmt: str = fmt
         self.log_file: Union[None, IO] = None
-        self.writer: Union[None, SummaryWriter] = writer
+        self.writer = writer
         if writer is not None:
             metadata.to_csv(os.path.join(writer.get_logdir(), 'metadata.tsv'), sep='\t')
         if record_log_path is not None:
@@ -140,13 +140,13 @@ def train_test_split_cite(
 
 @log_arguments
 def prepare_for_transfer(
-    model: scETM,
+    model,
     tgt_dataset: anndata.AnnData,
     aligned_src_genes: Sequence[str],
     keep_tgt_unique_genes: bool = False,
     fix_shared_genes: bool = False,
     batch_col: Union[str, None] = "batch_indices"
-) -> Tuple[scETM, anndata.AnnData]:
+):
     """Prepares the model (trained on the source dataset) and target dataset
     for transfer learning.
 

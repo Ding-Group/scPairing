@@ -1,0 +1,34 @@
+files:
+  mod1:
+    - /arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_rna.h5ad
+  mod2:
+    - /arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_atac.h5ad
+model_params:
+  emb_dim: 10
+  hidden_dims:
+    - 128
+  decode_features: True
+  decode_method: dropout
+  modality_discriminative: True
+  batch_discriminative: False
+  variational: True
+  distance_loss: False
+  loss_method: clip
+  cap_temperature: 50
+trainer_params:
+  n_epochs: 300
+  eval_every: 300
+  ping_every: 100
+  raw_layer:
+    - counts
+    - binary
+  transformed_layer:
+  transformed_obsm:
+    - X_scVI
+    - X_PeakVI
+  weight_decay: 0
+  batch_col: batch
+  batch_size: 5000
+cell_type_col: cell_type
+reconstruct: True
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/10x_bmmc/
