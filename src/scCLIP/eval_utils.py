@@ -5,12 +5,14 @@ import numpy as np
 import scanpy as sc
 import anndata as ad
 import pandas as pd
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import matplotlib
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
+import scipy
 from scipy.sparse.csr import spmatrix
 from scipy.stats import chi2
+from scipy.special import softmax
 from typing import Mapping, Sequence, Tuple, Iterable, Union
 from scipy.sparse import issparse
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_samples
@@ -39,8 +41,8 @@ def evaluate(adata: ad.AnnData,
     plot_ftype: str = "pdf",
     plot_dir: Union[str, None] = None,
     plot_dpi: int = 300,
-    writer: Union[None, SummaryWriter] = None,
-    min_dist: float = 0.3,
+    writer = None,
+    min_dist: float = 0.1,
     spread: float = 1,
     n_jobs: int = 1,
     random_state: Union[None, int, np.random.RandomState, np.random.Generator] = 0,
@@ -438,7 +440,7 @@ def clustering(
 
 def draw_embeddings(adata: ad.AnnData,
         color_by: Union[str, Sequence[str], None] = None,
-        min_dist: float = 0.3,
+        min_dist: float = 0.1,
         spread: float = 1,
         ckpt_dir: str = '.',
         fname: str = "umap.pdf",
@@ -519,3 +521,43 @@ def set_figure_params(
     """
     matplotlib.use(matplotlib_backend)
     sc.set_figure_params(dpi=dpi, figsize=figsize, fontsize=fontsize, frameon=frameon, vector_friendly=vector_friendly)
+
+
+def predict_matchings(mod1_features, mod2_features, logit_scale):
+    """
+    Provide confidence predictions for which of mod1 cells correspond to which
+    mod2 cells.
+    """
+    logits = mod1_features @ mod2_features.T
+    return softmax(logits * logit_scale, axis=1)
+
+
+def foscttm(x: np.ndarray, y: np.ndarray, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+    r"""
+    Fraction of samples closer than true match (smaller is better)
+
+    Parameters
+    ----------
+    x
+        Coordinates for samples in modality X
+    y
+        Coordinates for samples in modality y
+    **kwargs
+        Additional keyword arguments are passed to
+        :func:`scipy.spatial.distance_matrix`
+
+    Returns
+    -------
+    foscttm_x, foscttm_y
+        FOSCTTM for samples in modality X and Y, respectively
+
+    Note
+    ----
+    Samples in modality X and Y should be paired and given in the same order
+    """
+    if x.shape != y.shape:
+        raise ValueError("Shapes do not match!")
+    d = scipy.spatial.distance_matrix(x, y, **kwargs)
+    foscttm_x = (d < np.expand_dims(np.diag(d), axis=1)).mean(axis=1)
+    foscttm_y = (d < np.expand_dims(np.diag(d), axis=0)).mean(axis=0)
+    return foscttm_x, foscttm_y

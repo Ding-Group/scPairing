@@ -1,5 +1,4 @@
 from .BaseCellModel import BaseCellModel
-from .model_utils import get_fully_connected_layers, get_kl
 from .losses import ClipLoss, DebiasedClipLoss, BatchClipLoss, SigmoidLoss
 from .scCLIP import scCLIP
 from .trueCLIP import scCLIP

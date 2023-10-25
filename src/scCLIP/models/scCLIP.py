@@ -442,7 +442,7 @@ class scCLIP(nn.Module):
             mod2_preds = self.discriminator(mod2_features)
             truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
             discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
-            fwd_dict['mod_discriminative'] = discriminative_loss
+            fwd_dict['modality_discriminative'] = discriminative_loss
 
             loss = loss - discriminative_loss
 
@@ -480,9 +480,9 @@ class scCLIP(nn.Module):
             temp=fwd_dict['temp'],
         )
         if self.modality_discriminative and self.training:
-            record['modality_discriminative'] = fwd_dict['discriminative']
+            record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
-            record['batch_loss'] = fwd_dict['batch_loss']
+            record['batch_discriminative'] = fwd_dict['batch_discriminative']
         if self.distance_loss and self.training:
             record['dist'] = fwd_dict['dist']
         if self.loss_method == 'sigmoid':
