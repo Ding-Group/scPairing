@@ -1,4 +1,4 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Callable, Optional, List
+from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Callable, Optional, List, Literal
 import math
 import anndata
 import numpy as np
@@ -15,6 +15,10 @@ from .BaseCellModel import BaseCellModel
 from batch_sampler import CellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
+from .losses import ClipLoss, BatchClipLoss, DebiasedClipLoss, SigmoidLoss
+
+Loss = Literal['clip', 'debiased_clip', 'batch_clip', 'sigmoid']
+Modalities = Literal['rna', 'atac', 'protein', 'other']
 
 
 def get_fully_connected_layers(
@@ -43,147 +47,6 @@ def get_fully_connected_layers(
     return nn.Sequential(*layers)
 
 
-# def distance_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-#     """
-#     Computes the total distance between x and y on the hypersphere
-#     """
-#     dot = torch.clamp(torch.sum(x * y, dim=-1), -1 + 1e-7, 1 - 1e-7)
-#     return torch.mean(torch.acos(dot))
-
-
-class ClipLoss(nn.Module):
-    """
-    Implementation of ClipLoss borrowed from OpenCLIP
-    https://github.com/mlfoundations/open_clip
-    """
-    def __init__(
-        self,
-        cache_labels: bool = False,
-        downsample_clip: bool = False,
-        downsample_clip_prob: float = 0.5
-    ) -> None:
-        """
-        Initialize the CLIP loss
-        """
-        super().__init__()
-        self.cache_labels = cache_labels
-        self.downsample_clip = downsample_clip
-        self.downsample_clip_prob = downsample_clip_prob
-        
-        # cache state
-        self.prev_num_logits = 0
-        self.labels = {}
-    
-    def get_ground_truth(self, device, num_logits: int) -> torch.Tensor:
-        """
-        Get the ground truth. It is of form [0, 1, 2, ...], which means
-        that each cell is of its own class.
-        """
-        if self.prev_num_logits != num_logits or device not in self.labels:
-            labels = torch.arange(num_logits, device=device, dtype=torch.long)
-            if self.cache_labels:
-                self.labels[device] = labels
-                self.prev_num_logits = num_logits
-        else:
-            labels = self.labels[device]
-        return labels
-
-    def get_logits(self, atac_features, gex_features, logit_scale):
-        """
-        Get the logits corresponding the unnormalized probability that
-        the cell is actually itself.
-        """
-        logits_per_atac = logit_scale * atac_features @ gex_features.T
-        logits_per_gex = logit_scale * gex_features @ atac_features.T
-        return logits_per_atac, logits_per_gex
-
-    def forward(self, atac_features, gex_features, logit_scale) -> float:
-        """
-        Compute forward Clip Loss. It is the average of the cross entropies computed
-        from the two logits, logits_per_atac and logits_per_gex
-        """
-        if self.downsample_clip:
-            mask = torch.rand(atac_features.shape[0]) < self.downsample_clip_prob
-            atac_features = atac_features[mask, :]
-            gex_features = gex_features[mask, :]
-            if logit_scale.ndim > 0:
-                logit_scale = logit_scale[mask]
-
-        device = atac_features.device
-        logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
-
-        labels = self.get_ground_truth(device, logits_per_atac.shape[0])
-
-        total_loss = (F.cross_entropy(logits_per_atac, labels) + F.cross_entropy(logits_per_gex, labels)) / 2
-
-        return total_loss
-
-
-class DebiasedClipLoss(nn.Module):
-    """
-    Implementation of ClipLoss borrowed from OpenCLIP
-    https://github.com/mlfoundations/open_clip
-    """
-    def __init__(
-        self,
-        tau: float = 0.3,
-        cache_labels: bool = False,
-        downsample_clip: bool = False,
-        downsample_prob: float = 0.5
-    ) -> None:
-        """
-        Initialize the CLIP loss
-        """
-        super().__init__()
-        self.cache_labels = cache_labels
-        self.tau = tau
-        self.downsample_clip = downsample_clip
-        self.downsample_prob = downsample_prob
-        
-        # cache state
-        self.prev_num_logits = 0
-        self.labels = {}
-
-    def get_logits(self, atac_features, gex_features, logit_scale):
-        """
-        Get the logits corresponding the unnormalized probability that
-        the cell is actually itself.
-        """
-        logits_per_atac = logit_scale * atac_features @ gex_features.T
-        logits_per_gex = logit_scale * gex_features @ atac_features.T
-        return logits_per_atac, logits_per_gex
-
-    def calc_loss(self, logits, logit_scale):
-        logits = logits.exp()
-        diag = logits.diagonal()
-        N = logits.shape[0] - 1
-        Ng = (-N * self.tau * diag + (torch.sum(logits, dim=-1) - diag)) / (1 - self.tau)
-        b = N * (-1 / logit_scale).exp()
-        Ng[Ng < b] = b
-        return -torch.log(diag / (diag + Ng))
-
-    def forward(self, atac_features: torch.Tensor, gex_features: torch.Tensor, logit_scale: torch.Tensor) -> float:
-        """
-        Compute forward Clip Loss. It is the average of the cross entropies computed
-        from the two logits, logits_per_atac and logits_per_gex
-        """
-        if self.downsample_clip:
-            mask = torch.rand(atac_features.shape[0]) < self.downsample_prob
-            atac_features = atac_features[mask, :]
-            gex_features = gex_features[mask, :]
-            if logit_scale.ndim > 0:
-                logit_scale = logit_scale[mask]
-
-        logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
-
-        total_loss = (self.calc_loss(logits_per_atac, logit_scale) + self.calc_loss(logits_per_gex, logit_scale)) / 2
-
-        return total_loss.mean()
-
-# TODO: What about using the closest point embedded, like dictionary
-# TODO: Simulate with just two discrete cell types
-# TODO: What about supervised contrastive learning
-
 class scCLIP(BaseCellModel):
     """
 
@@ -198,8 +61,8 @@ class scCLIP(BaseCellModel):
         n_mod1_var: int,
         n_mod2_var: int,
         n_batches: int = 1,
-        mod1_type: str = 'rna',
-        mod2_type: str = 'atac',
+        mod1_type: Modalities = 'rna',
+        mod2_type: Modalities = 'atac',
         emb_dim: int = 64,
         hidden_dims: Sequence[int] = (128,),
         bn: bool = True,
@@ -214,6 +77,7 @@ class scCLIP(BaseCellModel):
         loss_method: str = 'clip',
         tau: float = 0.1,
         discriminative: bool = False,
+        batch_discriminative: bool = False,
         distance_loss: bool = False,
         variational: bool = False,
         downsample_clip: bool = False,
@@ -221,6 +85,7 @@ class scCLIP(BaseCellModel):
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
         per_cell_temperature: bool = False,
+        seed=None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         """
@@ -231,6 +96,8 @@ class scCLIP(BaseCellModel):
         In the future, the two encoders should be passed in.
         """
         super().__init__(n_mod1_dim, n_batches, need_batch=n_batches > 1, device=device)
+        if seed:
+            torch.manual_seed(seed)
 
         self.n_mod1_input = n_mod1_dim
         self.n_mod2_input = n_mod2_dim
@@ -260,8 +127,10 @@ class scCLIP(BaseCellModel):
             bn=self.bn,
             dropout_prob=self.dropout
         )
-        self.mean_encoder = nn.Linear(self.emb_dim, self.emb_dim)
-        self.var_encoder = nn.Linear(self.emb_dim, 1)
+        # self.mod1_encoder = nn.Linear(self.n_mod1_input, self.emb_dim + 1)
+        # self.mod2_encoder = nn.Linear(self.n_mod2_input, self.emb_dim + 1)
+        # self.mean_encoder = nn.Linear(self.emb_dim, self.emb_dim)
+        # self.var_encoder = nn.Linear(self.emb_dim, 1)
 
         self.per_cell_temperature = per_cell_temperature
         if set_temperature is not None:
@@ -289,7 +158,16 @@ class scCLIP(BaseCellModel):
                 nn.Sigmoid()  # Directly predict binary
             )
             self.bce_loss = torch.nn.BCELoss()
-        
+        self.batch_discriminative = batch_discriminative
+        if self.batch_discriminative:
+            self.batch_discriminator = nn.Sequential(
+                nn.Linear(self.emb_dim, 128),
+                nn.LayerNorm(128),
+                nn.ELU(),
+                nn.Linear(128, self.n_batches)
+            )
+            self.ce_loss = torch.nn.CrossEntropyLoss()
+
         self.distance_loss = distance_loss
         if self.distance_loss:
             self.mse_loss = torch.nn.MSELoss()
@@ -302,8 +180,14 @@ class scCLIP(BaseCellModel):
         self.loss_method = loss_method
         if loss_method == 'clip':
             self.clip_loss = ClipLoss(downsample_clip=downsample_clip, downsample_clip_prob=downsample_clip_prob)
-        elif loss_method == 'debiased':
+        elif loss_method == 'debiased_clip':
             self.clip_loss = DebiasedClipLoss(tau, downsample_clip=downsample_clip, downsample_prob=downsample_clip_prob)
+        elif loss_method == 'sigmoid':
+            self.clip_loss = SigmoidLoss()
+            self.bias = nn.Parameter(torch.ones([]) * 0)
+            self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        elif loss_method == 'batch_clip':
+            self.clip_loss = BatchClipLoss(tau)
         else:
             raise ValueError("loss_method should be one of 'clip' or 'debiased'")
 
@@ -327,14 +211,16 @@ class scCLIP(BaseCellModel):
         """
         Initialize the decoder from CLIP embedding to each model's dimension
         """
+        mod1_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod1_fn is None and self.n_batches > 1 else self.emb_dim
+        mod2_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod2_fn is None and self.n_batches > 1 else self.emb_dim
         self.mod1_decoder = nn.Sequential(
-            nn.Linear(self.emb_dim, 256),
+            nn.Linear(mod1_input_dim, 256),
             nn.BatchNorm1d(256),
             nn.ELU(),
             nn.Linear(256, self.n_mod1_output),
         )
         self.mod2_decoder = nn.Sequential(
-            nn.Linear(self.emb_dim, 256),
+            nn.Linear(mod2_input_dim, 256),
             nn.BatchNorm1d(256),
             nn.ELU(),
             nn.Linear(256, self.n_mod2_output),
@@ -353,6 +239,11 @@ class scCLIP(BaseCellModel):
         """
         Decode first modality data from the mod2 features
         """
+        if self.reconstruct_mod1_fn is None and self.n_batches > 1:
+            batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
+            if is_imputation:
+                batch_one_hot = torch.zeros(mod2_features.shape[0], self.n_batches)
+            mod2_features = torch.cat([mod2_features, batch_one_hot], axis=1)
         approx_mod1_features = self.mod1_decoder(mod2_features)
         if self.reconstruct_mod1_fn is None:
             if is_imputation:
@@ -379,14 +270,24 @@ class scCLIP(BaseCellModel):
         """
         Decode the second modality data from the mod1 features
         """
+        if self.reconstruct_mod2_fn is None and self.n_batches > 1:
+            batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
+            if is_imputation:
+                batch_one_hot = torch.zeros(mod1_features.shape[0], self.n_batches)
+            mod1_features = torch.cat([mod1_features, batch_one_hot], axis=1)
         approx_mod2_features = self.mod2_decoder(mod1_features)
         if self.reconstruct_mod2_fn is None:
             if self.mod2_type == 'atac':
                 mod2_reconstruct = torch.sigmoid(approx_mod2_features)
                 loss = F.binary_cross_entropy(mod2_reconstruct, counts, reduction="none").sum(-1).mean() * 10 / self.n_mod2_output if not is_imputation else None
-            else:
-                mod2_reconstruct = F.relu(approx_mod2_features)
+            elif self.mod2_type == 'protein':
+                if is_imputation:
+                    library_size = torch.ones([])
+                mod2_reconstruct = F.softmax(approx_mod2_features) * library_size
                 loss = -log_nb_positive(counts, mod2_reconstruct, self.mod2_dispersion.exp()).mean() / self.n_mod2_output if not is_imputation else None
+            else:
+                mod2_reconstruct = approx_mod2_features
+                loss = torch.nn.MSELoss()(counts, mod2_reconstruct).mean() / self.n_mod2_output if not is_imputation else None                
         else:
             mod2_reconstruct, loss = self.reconstruct_mod2_fn(approx_mod2_features, mod2_embs, counts, library_size, cell_indices, self.training, is_imputation, batch_indices)
         return {
@@ -448,31 +349,33 @@ class scCLIP(BaseCellModel):
         mod2_features = F.normalize(mod2_mu)
 
         if self.variational and self.decode_features:
-            # combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
+            combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
+            combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
+            combined_var = nn.Softplus()((mod1_var + mod2_var) / 2) + 1e-5
+
 
             # mu = self.mean_encoder(combined_features)
-            # mu = mu / torch.norm(mu, p=2, dim=-1, keepdim=True)
             # var = self.var_encoder(combined_features)  # Going to nan for some reason
             # var = nn.Softplus()(var) + 1e-5
 
-            # z_dist = PowerSpherical(mu, var.squeeze(-1))
-            # if self.training:
-            #     z = z_dist.rsample()
-            # else:
-            #     z = mu
+            z_dist = PowerSpherical(combined_features, combined_var.squeeze(-1))
             if self.training:
-                mod1_var = nn.Softplus()(mod1_var) + 1e-5
-                mod2_var = nn.Softplus()(mod2_var) + 1e-5
-                mod1_z_dist = PowerSpherical(mod1_features, mod1_var.squeeze(-1))
-                mod2_z_dist = PowerSpherical(mod2_features, mod2_var.squeeze(-1))
-
-                mod1_z = mod1_z_dist.rsample()
-                mod2_z = mod2_z_dist.rsample()
+                z = z_dist.rsample()
             else:
-                mod1_z, mod2_z = mod1_features, mod2_features
+                z = combined_features
+            # if self.training:
+            #     mod1_var = nn.Softplus()(mod1_var) + 1e-5
+            #     mod2_var = nn.Softplus()(mod2_var) + 1e-5
+            #     mod1_z_dist = PowerSpherical(mod1_features, mod1_var.squeeze(-1))
+            #     mod2_z_dist = PowerSpherical(mod2_features, mod2_var.squeeze(-1))
+
+            #     mod1_z = mod1_z_dist.rsample()
+            #     mod2_z = mod2_z_dist.rsample()
+            # else:
+            #     mod1_z, mod2_z = mod1_features, mod2_features
             
-            z = self.combine_features(mod1_z.clone(), mod2_z.clone())
-            z = F.normalize(z)
+            # z = self.combine_features(mod1_z.clone(), mod2_z.clone())
+            # z = F.normalize(z)
 
         if self.decode_features:
             if self.variational:
@@ -504,7 +407,7 @@ class scCLIP(BaseCellModel):
             "bernoulli": bernoulli
         }
         
-        if self.variational:
+        if self.variational and self.decode_features:
             fwd_dict['combined_features'] = z
         if self.decode_features:
             fwd_dict['mod1_reconstruct'] = mod1_dict['mod1_reconstruct']
@@ -513,12 +416,17 @@ class scCLIP(BaseCellModel):
         if not self.training:
             return fwd_dict
 
-
-        contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
+        if self.loss_method == 'sigmoid':
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, self.bias)
+            fwd_dict['bias'] = self.bias
+        elif self.loss_method == 'batch_clip':
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, batch_indices)
+        else:
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
         fwd_dict['contrastive'] = contrastive_loss
 
-        loss = log_px_zl + contrastive_loss  # TODO: is this -log_px_zl?
-        
+        loss = log_px_zl + contrastive_loss
+
         if self.discriminative and self.training:
             mod1_preds = self.discriminator(mod1_features)
             mod2_preds = self.discriminator(mod2_features)
@@ -527,6 +435,16 @@ class scCLIP(BaseCellModel):
             fwd_dict['discriminative'] = discriminative_loss
 
             loss = loss - discriminative_loss
+
+        if self.batch_discriminative and self.training:
+            batch_pred_1 = self.batch_discriminator(mod1_features)
+            batch_pred_2 = self.batch_discriminator(mod2_features)
+            truth = torch.cat([batch_indices, batch_indices])
+            batch_loss = self.ce_loss(torch.cat([batch_pred_1, batch_pred_2]).squeeze(-1), truth.squeeze(-1))
+            fwd_dict['batch_loss'] = batch_loss
+
+            loss = loss - batch_loss
+
 
         if self.distance_loss and self.training:
             dist_loss = self.mse_loss(mod1_features, mod2_features)
@@ -537,7 +455,8 @@ class scCLIP(BaseCellModel):
         if self.variational and self.decode_features:
             uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
             # ps = PowerSpherical(mu, var.squeeze(-1))
-            kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
+            # kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
+            kl = _kl_powerspherical_uniform(z_dist, uni)
             fwd_dict['KL'] = kl.mean()
             loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
         else:
@@ -553,8 +472,12 @@ class scCLIP(BaseCellModel):
         )
         if self.discriminative and self.training:
             record['discriminative'] = fwd_dict['discriminative']
+        if self.batch_discriminative and self.training:
+            record['batch_loss'] = fwd_dict['batch_loss']
         if self.distance_loss and self.training:
             record['dist'] = fwd_dict['dist']
+        if self.loss_method == 'sigmoid':
+            record['bias'] = fwd_dict['bias']
         record = {k: v.detach().item() for k, v in record.items()}
  
         # if self.discriminative and self.training:
@@ -569,6 +492,7 @@ class scCLIP(BaseCellModel):
             return None
         mod1_input = data_dict["cells_1_transformed"]
         mod2_input = data_dict["cells_2_transformed"]
+        batch_indices = data_dict.get('batch_indices', None)
 
         mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
@@ -578,13 +502,21 @@ class scCLIP(BaseCellModel):
         # L2 normalization
         mod1_features = F.normalize(mod1_mu)
         mod2_features = F.normalize(mod2_mu)
-        # mod1_features = F.normalize(mod1_features)
-        # mod2_features = F.normalize(mod2_features)
 
-        mod1_preds = self.discriminator(mod1_features)
-        mod2_preds = self.discriminator(mod2_features)
-        truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
-        discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
+        discriminative_loss = 0
+        if self.discriminative:
+            mod1_preds = self.discriminator(mod1_features)
+            mod2_preds = self.discriminator(mod2_features)
+            truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
+            discriminative_loss = discriminative_loss + self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
+
+        if self.batch_discriminative:
+            batch_pred_1 = self.batch_discriminator(mod1_features)
+            batch_pred_2 = self.batch_discriminator(mod2_features)
+            truth = torch.cat([batch_indices, batch_indices])
+            batch_loss = self.ce_loss(torch.cat([batch_pred_1, batch_pred_2]).squeeze(-1), truth.squeeze(-1))
+
+            discriminative_loss = discriminative_loss + batch_loss
         return discriminative_loss
 
     def get_cell_embeddings_and_nll(
@@ -691,14 +623,15 @@ class scCLIP(BaseCellModel):
         mod1_input = data_dict["cells_1_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
         mod1_features = self.mod1_encoder(mod1_input)
-        mod1_features = F.normalize(mod1_features)
         mu = mod1_features[:, :self.emb_dim]
+        mu = F.normalize(mu)
+        
+        if not self.decode_features:
+            return dict(mod1_features=mu, mod2_reconstruct=torch.zeros(mod1_input.shape))
 
         mod2_reconstruct = self.decode_mod2(mu, None, None, None, None, batch_indices, True)
-
         fwd_dict = dict(
-            mod1_features=mod1_features,
-            mu=mu,
+            mod1_features=mu,
             mod2_reconstruct=mod2_reconstruct['mod2_reconstruct']
         )
         return fwd_dict
@@ -713,15 +646,15 @@ class scCLIP(BaseCellModel):
         mod2_input = data_dict["cells_2_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
         mod2_features = self.mod2_encoder(mod2_input)
-        mod2_features = F.normalize(mod2_features)
         mu = mod2_features[:, :self.emb_dim]
+        mu = F.normalize(mu)
+        if not self.decode_features:
+            return dict(mod2_features=mu, mod1_reconstruct=torch.zeros(mod2_input.shape))
 
         mod1_reconstruct = self.decode_mod1(mu, None, None, None, None, batch_indices, True)
-        # mod2_reconstruct = self.mod2_decoder(mu)
 
         fwd_dict = dict(
-            mod2_features=mod2_features,
-            mu=mu,
+            mod2_features=mu,
             mod1_reconstruct=mod1_reconstruct['mod1_reconstruct'],
         )
         return fwd_dict
@@ -754,16 +687,19 @@ class scCLIP(BaseCellModel):
 
         self.eval()
         embs = []
+        features = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
             fwd_dict = self._pred_mod1_mod2_forward(data_dict, hyper_param_dict)
             embs.append(fwd_dict['mod2_reconstruct'].detach().cpu())
+            features.append(fwd_dict['mod1_features'].detach().cpu())
         
         # embs = {name: torch.cat(embs[name], dim=0).numpy() for name in ['mod1_pred', 'mod2_pred']}
         embs = torch.cat(embs, dim=0).numpy()
+        features = torch.cat(features, dim=0).numpy()
 
         if inplace:
-            adata_1.obsm.update({'mod2_imputed': embs})
+            adata_1.obsm.update({'mod2_imputed': embs, 'mod1_features': features})
             return None
         else:
             return embs
@@ -796,15 +732,18 @@ class scCLIP(BaseCellModel):
 
         self.eval()
         embs = []
+        features = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
             fwd_dict = self._pred_mod2_mod1_forward(data_dict, hyper_param_dict)
             embs.append(fwd_dict['mod1_reconstruct'].detach().cpu())
+            features.append(fwd_dict['mod2_features'].detach().cpu())
         
         embs = torch.cat(embs, dim=0).numpy()
+        features = torch.cat(features, dim=0).numpy()
 
         if inplace:
-            adata_2.obsm.update({'mod1_imputed': embs})
+            adata_2.obsm.update({'mod1_imputed': embs, 'mod2_features': features})
             return None
         else:
             return embs

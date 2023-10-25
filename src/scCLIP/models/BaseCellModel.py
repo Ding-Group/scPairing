@@ -1,4 +1,4 @@
-from typing import Any, Callable, Mapping, Sequence, Tuple, Union, Iterable
+from typing import Any, Callable, Mapping, Sequence, Tuple, Union, Iterable, List
 import anndata
 import logging
 import numpy as np
@@ -62,7 +62,7 @@ class BaseCellModel(nn.Module):
         return self.n_trainable_genes + self.n_fixed_genes
     
     def train_step(self,
-        optimizer: optim.Optimizer,
+        optimizers: List[optim.Optimizer],
         data_dict: Mapping[str, torch.Tensor],
         hyper_param_dict: Mapping[str, Any],
         loss_update_callback: Union[None, Callable] = None
@@ -87,14 +87,20 @@ class BaseCellModel(nn.Module):
         """
 
         self.train()
-        optimizer.zero_grad()
+        optimizers[0].zero_grad()
         loss, fwd_dict, new_record = self(data_dict, hyper_param_dict)
         if loss_update_callback is not None:
             loss, new_record = loss_update_callback(loss, fwd_dict, new_record)
         loss.backward()
         norms = torch.nn.utils.clip_grad_norm_(self.parameters(), 50)
         new_record['max_norm'] = norms.cpu().numpy()
-        optimizer.step()
+        optimizers[0].step()
+
+        if optimizers[1] is not None:
+            loss = self.discriminative_forward(data_dict, hyper_param_dict)
+            optimizers[1].zero_grad()
+            loss.backward()
+            optimizers[1].step()
         return new_record
 
     def _apply_to(self,
