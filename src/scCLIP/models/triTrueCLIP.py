@@ -1,4 +1,4 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Optional, Callable, Literal, List
+from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Callable, Optional, List
 import math
 import anndata
 import numpy as np
@@ -7,25 +7,22 @@ from scipy.sparse import spmatrix
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+# from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Normal, Independent
 
 from logging_utils import log_arguments
 from .BaseCellModel import BaseCellModel
-from batch_sampler import CellSampler
+from batch_sampler import TriCellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
-from .losses import ClipLoss, BatchClipLoss, DebiasedClipLoss, SigmoidLoss
-
-Loss = Literal['clip', 'debiased_clip', 'batch_clip', 'sigmoid']
-Modalities = Literal['rna', 'atac', 'protein', 'other']
 
 
 def get_fully_connected_layers(
     input_dim: int,
     output_dim: int,
     hidden_dims: Sequence[int],
-    norm_type: Literal['layer', 'batch', 'none'] = 'layer',
+    bn: bool = True,
+    bn_track_running_stats: bool = True,
     dropout_prob: float = 0
 ) -> nn.Sequential:
     """
@@ -35,14 +32,10 @@ def get_fully_connected_layers(
     """
     layers = []
     for i, size in enumerate(hidden_dims):
-        lin = nn.Linear(input_dim, size)
-        nn.init.xavier_normal_(lin.weight)
-        layers.append(lin)
-        layers.append(nn.ReLU())
-        if norm_type == 'layer':
-            layers.append(nn.LayerNorm(size))
-        elif norm_type == 'batch':
-            layers.append(nn.BatchNorm1d(size))
+        layers.append(nn.Linear(input_dim, size))
+        layers.append(nn.ELU())
+        if bn:
+            layers.append(nn.BatchNorm1d(size, track_running_stats=bn_track_running_stats))
         if dropout_prob:
             layers.append(nn.Dropout(dropout_prob))
         input_dim = size
@@ -50,7 +43,164 @@ def get_fully_connected_layers(
     return nn.Sequential(*layers)
 
 
-class scCLIP(nn.Module):
+class SigmoidLoss(nn.Module):
+    """
+    Implementation of Sigmoid loss
+    """
+    def __init__(self) -> None:
+        super().__init__()
+        self.log_sigmoid = torch.nn.LogSigmoid()
+
+    def get_logits(self, atac_features, gex_features, logit_scale, bias):
+        """
+        Get the logits corresponding the unnormalized probability that
+        the cell is actually itself.
+        """
+        logits = logit_scale * atac_features @ gex_features.T + bias
+        return logits
+
+    def forward(self, mod1_features, mod2_features, logit_scale, bias):
+        n = mod1_features.shape[0]
+        logits = self.get_logits(mod1_features, mod2_features, logit_scale, bias)
+        labels =  2 * torch.eye(n, device=mod1_features.device) - torch.ones((n, n), device=mod1_features.device)
+        return -self.log_sigmoid(labels * logits).sum() / n
+
+
+class ClipLoss(nn.Module):
+    """
+    Implementation of ClipLoss borrowed from OpenCLIP
+    https://github.com/mlfoundations/open_clip
+    """
+    def __init__(
+        self,
+        cache_labels: bool = False,
+        downsample_clip: bool = False,
+        downsample_clip_prob: float = 0.5
+    ) -> None:
+        """
+        Initialize the CLIP loss
+        """
+        super().__init__()
+        self.cache_labels = cache_labels
+        self.downsample_clip = downsample_clip
+        self.downsample_clip_prob = downsample_clip_prob
+        
+        # cache state
+        self.prev_num_logits = 0
+        self.labels = {}
+    
+    def get_ground_truth(self, device, num_logits: int) -> torch.Tensor:
+        """
+        Get the ground truth. It is of form [0, 1, 2, ...], which means
+        that each cell is of its own class.
+        """
+        if self.prev_num_logits != num_logits or device not in self.labels:
+            labels = torch.arange(num_logits, device=device, dtype=torch.long)
+            if self.cache_labels:
+                self.labels[device] = labels
+                self.prev_num_logits = num_logits
+        else:
+            labels = self.labels[device]
+        return labels
+
+    def get_logits(self, atac_features, gex_features, logit_scale):
+        """
+        Get the logits corresponding the unnormalized probability that
+        the cell is actually itself.
+        """
+        logits_per_atac = logit_scale * atac_features @ gex_features.T
+        logits_per_gex = logit_scale * gex_features @ atac_features.T
+        return logits_per_atac, logits_per_gex
+
+    def forward(self, atac_features, gex_features, logit_scale) -> float:
+        """
+        Compute forward Clip Loss. It is the average of the cross entropies computed
+        from the two logits, logits_per_atac and logits_per_gex
+        """
+        if self.downsample_clip:
+            mask = torch.rand(atac_features.shape[0]) < self.downsample_clip_prob
+            atac_features = atac_features[mask, :]
+            gex_features = gex_features[mask, :]
+            if logit_scale.ndim > 0:
+                logit_scale = logit_scale[mask]
+
+        device = atac_features.device
+        logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
+
+        labels = self.get_ground_truth(device, logits_per_atac.shape[0])
+
+        total_loss = (F.cross_entropy(logits_per_atac, labels) + F.cross_entropy(logits_per_gex, labels)) / 2
+
+        return total_loss
+
+
+class DebiasedClipLoss(nn.Module):
+    """
+    Implementation of ClipLoss borrowed from OpenCLIP
+    https://github.com/mlfoundations/open_clip
+    """
+    def __init__(
+        self,
+        tau: float = 0.3,
+        cache_labels: bool = False,
+        downsample_clip: bool = False,
+        downsample_prob: float = 0.5
+    ) -> None:
+        """
+        Initialize the CLIP loss
+        """
+        super().__init__()
+        self.cache_labels = cache_labels
+        self.tau = tau
+        self.downsample_clip = downsample_clip
+        self.downsample_prob = downsample_prob
+        
+        # cache state
+        self.prev_num_logits = 0
+        self.labels = {}
+
+    def get_logits(self, atac_features, gex_features, logit_scale):
+        """
+        Get the logits corresponding the unnormalized probability that
+        the cell is actually itself.
+        """
+        logits_per_atac = logit_scale * atac_features @ gex_features.T
+        logits_per_gex = logit_scale * gex_features @ atac_features.T
+        return logits_per_atac, logits_per_gex
+
+    def calc_loss(self, logits, logit_scale):
+        logits = logits.exp()
+        diag = logits.diagonal()
+        N = logits.shape[0] - 1
+        Ng = (-N * self.tau * diag + (torch.sum(logits, dim=-1) - diag)) / (1 - self.tau)
+        b = N * (-1 / logit_scale).exp()
+        Ng[Ng < b] = b
+        return -torch.log(diag / (diag + Ng))
+
+    def forward(self, atac_features: torch.Tensor, gex_features: torch.Tensor, logit_scale: torch.Tensor) -> float:
+        """
+        Compute forward Clip Loss. It is the average of the cross entropies computed
+        from the two logits, logits_per_atac and logits_per_gex
+        """
+        if self.downsample_clip:
+            mask = torch.rand(atac_features.shape[0]) < self.downsample_prob
+            atac_features = atac_features[mask, :]
+            gex_features = gex_features[mask, :]
+            if logit_scale.ndim > 0:
+                logit_scale = logit_scale[mask]
+
+        logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
+
+        total_loss = (self.calc_loss(logits_per_atac, logit_scale) + self.calc_loss(logits_per_gex, logit_scale)) / 2
+
+        return total_loss.mean()
+
+# TODO: What about using the closest point embedded, like dictionary
+# TODO: Simulate with just two discrete cell types
+# TODO: What about supervised contrastive learning
+# TODO: Select certain genes/cells and see what the correlation is like
+
+class scCLIP(BaseCellModel):
     """
 
     """
@@ -59,27 +209,31 @@ class scCLIP(nn.Module):
 
     def __init__(
         self,
-        n_mod1_input: int,
-        n_mod2_input: int,
+        n_mod1_dim: int,
+        n_mod2_dim: int,
+        n_mod3_dim: int,
         n_mod1_var: int,
         n_mod2_var: int,
+        n_mod3_var: int,
         n_batches: int = 1,
-        mod1_type: Modalities = 'rna',
-        mod2_type: Modalities = 'atac',
-        emb_dim: int = 10,
-        encoder_hidden_dims: Sequence[int] = (128,),
-        decoder_hidden_dims: Sequence[int] = (128,),
-        use_norm: Literal['layer', 'batch', 'none'] = 'layer',
+        mod1_type: str = 'rna',
+        mod2_type: str = 'atac',
+        mod3_type: str = 'protein',
+        emb_dim: int = 64,
+        hidden_dims: Sequence[int] = (128,),
+        bn: bool = True,
         dropout_prob: float = 0.1,
         decode_features: bool = True,
+        encode_hvar: bool = False,
+        decode_hvar: bool = False,
         reconstruct_mod1_fn: Optional[Callable] = None,
         reconstruct_mod2_fn: Optional[Callable] = None,
+        reconstruct_mod3_fn: Optional[Callable] = None,
         combine_method: str = "dropout",
         dropout_in_eval: bool = True,
-        loss_method: Loss = 'clip',
+        loss_method: str = 'clip',
         tau: float = 0.1,
-        modality_discriminative: bool = False,
-        batch_discriminative: bool = False,
+        discriminative: bool = False,
         distance_loss: bool = False,
         variational: bool = False,
         downsample_clip: bool = False,
@@ -87,7 +241,6 @@ class scCLIP(nn.Module):
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
         per_cell_temperature: bool = False,
-        seed=None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         """
@@ -97,50 +250,44 @@ class scCLIP(nn.Module):
 
         In the future, the two encoders should be passed in.
         """
-        super().__init__()
+        super().__init__(n_mod1_dim, n_batches, need_batch=n_batches > 1, device=device)
 
-        if seed:
-            torch.manual_seed(seed)
-
-        # Model parameters
-        self.device: torch.device = device
-        self.n_batches: int = n_batches
-        self.need_batch: bool = n_batches > 1
-
-        # Encoder input dimensions
-        self.n_mod1_input: int = n_mod1_input
-        self.n_mod2_input: int = n_mod2_input
-        # Decoder output dimensions
-        self.n_mod1_output: int = n_mod1_var if reconstruct_mod1_fn is None else n_mod1_input
-        self.n_mod2_output: int = n_mod2_var if reconstruct_mod2_fn is None else n_mod2_input
-
-        self.emb_dim: int = emb_dim
-        self.encoder_hidden_dims: Sequence[int] = encoder_hidden_dims
-        self.decoder_hidden_dims: Sequence[int] = decoder_hidden_dims
-        self.norm: Literal['layer', 'batch', 'none'] = use_norm
-        self.dropout: float = dropout_prob
-
-        # Validate modality types
-        if mod1_type not in ['rna', 'atac', 'protein', 'other']:
-            raise ValueError("mod1_type must be one of 'rna', 'atac', 'protein', or 'other'")
-        if mod2_type not in ['rna', 'atac', 'protein', 'other']:
-            raise ValueError("mod1_type must be one of 'rna', 'atac', 'protein', or 'other'")
-        self.mod1_type: Modalities = mod1_type
-        self.mod2_type: Modalities = mod2_type
+        self.n_mod1_input = n_mod1_dim
+        self.n_mod2_input = n_mod2_dim
+        self.n_mod3_input = n_mod3_dim
+        self.n_mod1_output = n_mod1_var if reconstruct_mod1_fn is None else n_mod1_dim
+        self.n_mod2_output = n_mod2_var if reconstruct_mod2_fn is None else n_mod2_dim
+        self.n_mod3_output = n_mod3_var if reconstruct_mod3_fn is None else n_mod3_dim
+        self.emb_dim = emb_dim
+        self.hidden_dims = hidden_dims
+        self.bn = bn
+        self.dropout = dropout_prob
+        self.encode_hvar = encode_hvar
+        self.decode_hvar = decode_hvar
+        self.mod1_type = mod1_type
+        self.mod2_type = mod2_type
+        self.mod3_type = mod3_type
 
         # Encoder networks
         self.mod1_encoder = get_fully_connected_layers(
             self.n_mod1_input,
             self.emb_dim + 1,
-            self.encoder_hidden_dims,
-            norm_type=self.norm,
+            self.hidden_dims,
+            bn=self.bn,
             dropout_prob=self.dropout
         )
         self.mod2_encoder = get_fully_connected_layers(
             self.n_mod2_input,
             self.emb_dim + 1,
-            self.encoder_hidden_dims,
-            norm_type=self.norm,
+            self.hidden_dims,
+            bn=self.bn,
+            dropout_prob=self.dropout
+        )
+        self.mod3_encoder = get_fully_connected_layers(
+            self.n_mod3_input,
+            self.emb_dim + 1,
+            self.hidden_dims,
+            bn=self.bn,
             dropout_prob=self.dropout
         )
 
@@ -149,7 +296,7 @@ class scCLIP(nn.Module):
             self.logit_scale = torch.ones([]) * set_temperature 
         elif per_cell_temperature:
             self.logit_scale_nn = nn.Sequential(
-                nn.Linear(self.n_mod1_input + self.n_mod2_input, 16),
+                nn.Linear(self.n_mod1_input + self.n_mod2_input + self.n_mod3_input, 16),
                 nn.LayerNorm(16),
                 nn.ELU(),
                 nn.Linear(16, 1),
@@ -160,26 +307,16 @@ class scCLIP(nn.Module):
 
         self.cap_temperature = cap_temperature
 
-        self.modality_discriminative = modality_discriminative
-        if self.modality_discriminative:
+        self.discriminative = discriminative
+        if self.discriminative:
             self.discriminator = nn.Sequential(
                 nn.Linear(self.emb_dim, 128),
                 nn.LayerNorm(128),
                 nn.ELU(),
-                nn.Linear(128, 1),
-                nn.Sigmoid()  # Directly predict binary
-            )
-            self.bce_loss = torch.nn.BCELoss()
-        self.batch_discriminative = batch_discriminative
-        if self.batch_discriminative:
-            self.batch_discriminator = nn.Sequential(
-                nn.Linear(self.emb_dim, 128),
-                nn.LayerNorm(128),
-                nn.ELU(),
-                nn.Linear(128, self.n_batches)
+                nn.Linear(128, 3)
             )
             self.ce_loss = torch.nn.CrossEntropyLoss()
-
+        
         self.distance_loss = distance_loss
         if self.distance_loss:
             self.mse_loss = torch.nn.MSELoss()
@@ -192,14 +329,12 @@ class scCLIP(nn.Module):
         self.loss_method = loss_method
         if loss_method == 'clip':
             self.clip_loss = ClipLoss(downsample_clip=downsample_clip, downsample_clip_prob=downsample_clip_prob)
-        elif loss_method == 'debiased_clip':
+        elif loss_method == 'debiased':
             self.clip_loss = DebiasedClipLoss(tau, downsample_clip=downsample_clip, downsample_prob=downsample_clip_prob)
         elif loss_method == 'sigmoid':
             self.clip_loss = SigmoidLoss()
             self.bias = nn.Parameter(torch.ones([]) * 0)
             self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        elif loss_method == 'batch_clip':
-            self.clip_loss = BatchClipLoss(tau)
         else:
             raise ValueError("loss_method should be one of 'clip' or 'debiased'")
 
@@ -213,6 +348,9 @@ class scCLIP(nn.Module):
         self.reconstruct_mod2_fn = reconstruct_mod2_fn
         if self.reconstruct_mod2_fn is None and self.mod2_type == 'protein':
             self.mod2_dispersion = nn.Parameter(torch.rand(self.n_mod2_output))
+        self.reconstruct_mod3_fn = reconstruct_mod3_fn
+        if self.reconstruct_mod3_fn is None and self.mod3_type == 'protein':
+            self.mod3_dispersion = nn.Parameter(torch.rand(self.n_mod3_output))
         if self.decode_features:
             self._init_decoders()
 
@@ -223,21 +361,26 @@ class scCLIP(nn.Module):
         """
         Initialize the decoder from CLIP embedding to each model's dimension
         """
-        mod1_decoder_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod1_fn is None and self.n_batches > 1 else self.emb_dim
-        mod2_decoder_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod2_fn is None and self.n_batches > 1 else self.emb_dim
-        self.mod1_decoder = get_fully_connected_layers(
-            mod1_decoder_input_dim,
-            self.n_mod1_output,
-            hidden_dims=self.decoder_hidden_dims,
-            norm_type=self.norm,
-            dropout_prob=self.dropout
+        mod1_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod1_fn is None and self.n_batches > 1 else self.emb_dim
+        mod2_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod2_fn is None and self.n_batches > 1 else self.emb_dim
+        mod3_input_dim = self.emb_dim + self.n_batches if self.reconstruct_mod3_fn is None and self.n_batches > 1 else self.emb_dim
+        self.mod1_decoder = nn.Sequential(
+            nn.Linear(mod1_input_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ELU(),
+            nn.Linear(256, self.n_mod1_output),
         )
-        self.mod2_decoder = get_fully_connected_layers(
-            mod2_decoder_input_dim,
-            self.n_mod2_output,
-            hidden_dims=self.decoder_hidden_dims,
-            norm_type=self.norm,
-            dropout_prob=self.dropout
+        self.mod2_decoder = nn.Sequential(
+            nn.Linear(mod2_input_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ELU(),
+            nn.Linear(256, self.n_mod2_output),
+        )
+        self.mod3_decoder = nn.Sequential(
+            nn.Linear(mod3_input_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.ELU(),
+            nn.Linear(256, self.n_mod3_output),
         )
 
     def decode_mod1(
@@ -299,7 +442,7 @@ class scCLIP(nn.Module):
                     library_size = torch.ones([])
                 mod2_reconstruct = F.softmax(approx_mod2_features) * library_size
                 loss = -log_nb_positive(counts, mod2_reconstruct, self.mod2_dispersion.exp()).mean() / self.n_mod2_output if not is_imputation else None
-            elif self.mod2_type == 'other':
+            else:
                 mod2_reconstruct = approx_mod2_features
                 loss = torch.nn.MSELoss()(counts, mod2_reconstruct).mean() / self.n_mod2_output if not is_imputation else None                
         else:
@@ -308,31 +451,60 @@ class scCLIP(nn.Module):
             'mod2_reconstruct': mod2_reconstruct,
             'nll': loss
         }
+    
+    def decode_mod3(
+        self,
+        clip_features: torch.Tensor,
+        mod3_embs: torch.Tensor,
+        counts: torch.Tensor,
+        library_size: torch.Tensor,
+        cell_indices: torch.Tensor,
+        batch_indices: Optional[torch.Tensor] = None,
+        is_imputation: bool = False,
+    ) -> Mapping[str, Any]:
+        """
+        Decode the second modality data from the mod1 features
+        """
+        if self.reconstruct_mod3_fn is None and self.n_batches > 1:
+            batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
+            if is_imputation:
+                batch_one_hot = torch.zeros(clip_features.shape[0], self.n_batches)
+            clip_features = torch.cat([clip_features, batch_one_hot], axis=1)
+        approx_mod3_features = self.mod3_decoder(clip_features)
+        if self.reconstruct_mod3_fn is None:
+            if self.mod3_type == 'atac':
+                mod3_reconstruct = torch.sigmoid(approx_mod3_features)
+                loss = F.binary_cross_entropy(mod3_reconstruct, counts, reduction="none").sum(-1).mean() * 10 / self.n_mod3_output if not is_imputation else None
+            elif self.mod3_type == 'protein':
+                if is_imputation:
+                    library_size = torch.ones([])
+                mod3_reconstruct = F.softmax(approx_mod3_features) * library_size
+                loss = -log_nb_positive(counts, mod3_reconstruct, self.mod3_dispersion.exp()).mean() / self.n_mod3_output if not is_imputation else None
+            else:
+                mod3_reconstruct = approx_mod3_features
+                loss = torch.nn.MSELoss()(counts, mod3_reconstruct).mean() / self.n_mod3_output if not is_imputation else None                
+        else:
+            mod3_reconstruct, loss = self.reconstruct_mod3_fn(approx_mod3_features, mod3_embs, counts, library_size, cell_indices, self.training, is_imputation, batch_indices)
+        return {
+            'mod3_reconstruct': mod3_reconstruct,
+            'nll': loss
+        }
 
     def combine_features(
         self,
         mod1_features: torch.Tensor,
-        mod2_features: torch.Tensor
+        mod2_features: torch.Tensor,
+        mod3_features: torch.Tensor
     ) -> torch.Tensor:
         """
         Combines the features using the combine_method of this model
         """
-        if self.combine_method == 'average':
-            return (mod1_features + mod2_features) / 2
-        elif self.combine_method == 'dropout':
-            if self.training or not self.dropout_in_eval:
-                mod1_indices = self.dropout_layer(self.emb_indices)
-                mod1_indices = mod1_indices.long()
-                mod1_features[:, mod1_indices == 0] = 0
-                mod2_features[:, mod1_indices != 0] = 0
-                combined = mod1_features + mod2_features
-                return combined
-            else:
-                mask = torch.rand(self.emb_indices.shape[0]) < 0.5
-                mod1_features[:, mask] = 0
-                mod2_features[:, ~mask] = 0
-                combined = mod1_features + mod2_features
-                return combined
+        indices = torch.randint(0, 3, (self.emb_dim,))
+        mod1_features[:, indices == 0] = 0
+        mod2_features[:, indices == 1] = 0
+        mod3_features[:, indices == 2] = 0
+        combined = mod1_features + mod2_features + mod3_features
+        return combined
 
     def forward(
         self,
@@ -342,64 +514,57 @@ class scCLIP(nn.Module):
         """
         Compute the forward pass
         """
-        counts_1, counts_2 = data_dict["cells_1"], data_dict["cells_2"]
-        library_size_1, library_size_2 = data_dict["library_size_1"], data_dict["library_size_2"]
+        counts_1, counts_2, counts_3 = data_dict["cells_1"], data_dict["cells_2"], data_dict["cells_3"]
+        library_size_1, library_size_2, library_size_3 = data_dict["library_size_1"], data_dict["library_size_2"], data_dict["library_size_3"]
         cell_indices = data_dict['cell_indices']
         batch_indices = data_dict.get('batch_indices', None)
 
         mod1_input = data_dict["cells_1_transformed"]
         mod2_input = data_dict["cells_2_transformed"]
+        mod3_input = data_dict["cells_3_transformed"]
 
         mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
+        mod3_features = self.mod3_encoder(mod3_input)
 
         mod1_mu, mod1_var = mod1_features[:, :self.emb_dim], mod1_features[:, self.emb_dim:]
         mod2_mu, mod2_var = mod2_features[:, :self.emb_dim], mod2_features[:, self.emb_dim:]
+        mod3_mu, mod3_var = mod3_features[:, :self.emb_dim], mod3_features[:, self.emb_dim:]
 
         # L2 normalization
         mod1_features = F.normalize(mod1_mu)
         mod2_features = F.normalize(mod2_mu)
+        mod3_features = F.normalize(mod3_mu)
 
         if self.variational and self.decode_features:
-            combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())
-            combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-            combined_var = nn.Softplus()((mod1_var + mod2_var) / 2) + 1e-5
-
-            # mu = self.mean_encoder(combined_features)
-            # var = self.var_encoder(combined_features)  # Going to nan for some reason
-            # var = nn.Softplus()(var) + 1e-5
-
-            z_dist = PowerSpherical(combined_features, combined_var.squeeze(-1))
             if self.training:
-                z = z_dist.rsample()
-            else:
-                z = combined_features
-            # if self.training:
-            #     mod1_var = nn.Softplus()(mod1_var) + 1e-5
-            #     mod2_var = nn.Softplus()(mod2_var) + 1e-5
-            #     mod1_z_dist = PowerSpherical(mod1_features, mod1_var.squeeze(-1))
-            #     mod2_z_dist = PowerSpherical(mod2_features, mod2_var.squeeze(-1))
+                mod1_var = nn.Softplus()(mod1_var) + 1e-5
+                mod2_var = nn.Softplus()(mod2_var) + 1e-5
+                mod3_var = nn.Softplus()(mod3_var) + 1e-5
+                mod1_z_dist = PowerSpherical(mod1_features, mod1_var.squeeze(-1))
+                mod2_z_dist = PowerSpherical(mod2_features, mod2_var.squeeze(-1))
+                mod3_z_dist = PowerSpherical(mod3_features, mod3_var.squeeze(-1))
 
-            #     mod1_z = mod1_z_dist.rsample()
-            #     mod2_z = mod2_z_dist.rsample()
-            # else:
-            #     mod1_z, mod2_z = mod1_features, mod2_features
-            
-            # z = self.combine_features(mod1_z.clone(), mod2_z.clone())
-            # z = F.normalize(z)
+                mod1_z = mod1_z_dist.rsample()
+                mod2_z = mod2_z_dist.rsample()
+                mod3_z = mod3_z_dist.rsample()
+            else:
+                mod1_z, mod2_z, mod3_z = mod1_features, mod2_features, mod3_features
+        else:
+            mod1_z, mod2_z, mod3_z = mod1_features, mod2_features, mod3_features
+        z = self.combine_features(mod1_z.clone(), mod2_z.clone(), mod3_z.clone())
+        z = F.normalize(z)
 
         if self.decode_features:
-            if self.variational:
-                mod1_dict = self.decode_mod1(z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
-                mod2_dict = self.decode_mod2(z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
-            else:
-                mod1_dict = self.decode_mod1(mod2_features, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
-                mod2_dict = self.decode_mod2(mod1_features, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
-            log_px_zl = mod1_dict['nll'] + mod2_dict['nll']
-            nb = mod1_dict['nll']
-            bernoulli = mod2_dict['nll']
+            mod1_dict = self.decode_mod1(z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
+            mod2_dict = self.decode_mod2(z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
+            mod3_dict = self.decode_mod3(z, mod3_input, counts_3, library_size_3, cell_indices, batch_indices)
+            log_px_zl = mod1_dict['nll'] + mod2_dict['nll'] + mod3_dict['nll']
+            loss1 = mod1_dict['nll']
+            loss2 = mod2_dict['nll']
+            loss3 = mod3_dict['nll']
         else:
-            log_px_zl = nb = bernoulli = torch.zeros([])
+            log_px_zl = loss1 = loss2 = loss3 = torch.zeros([])
 
         if self.per_cell_temperature:
             logit_scale = self.logit_scale_nn(torch.cat([mod1_input, mod2_input], axis=1)).exp()
@@ -407,65 +572,63 @@ class scCLIP(nn.Module):
             logit_scale = self.logit_scale.exp()
         if self.cap_temperature is not None:
             logit_scale = torch.clamp(logit_scale, max=self.cap_temperature)
+            
 
         fwd_dict = {
             "mod1_features": mod1_features,
             "mod2_features": mod2_features,
+            "mod3_features": mod3_features,
             "temp": logit_scale.mean(),
             "nll": log_px_zl.mean(),
-            "nb": nb,
-            "bernoulli": bernoulli
+            "loss1": loss1,
+            "loss2": loss2,
+            "loss3": loss3
         }
-        
-        if self.variational and self.decode_features:
-            fwd_dict['combined_features'] = z
+
+        fwd_dict['combined_features'] = z
         if self.decode_features:
             fwd_dict['mod1_reconstruct'] = mod1_dict['mod1_reconstruct']
             fwd_dict['mod2_reconstruct'] = mod2_dict['mod2_reconstruct']
+            fwd_dict['mod3_reconstruct'] = mod3_dict['mod3_reconstruct']
 
         if not self.training:
             return fwd_dict
 
         if self.loss_method == 'sigmoid':
-            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, self.bias)
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, self.bias) + self.clip_loss(mod2_features, mod3_features, logit_scale, self.bias)
             fwd_dict['bias'] = self.bias
-        elif self.loss_method == 'batch_clip':
-            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, batch_indices)
         else:
-            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
+            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale) + \
+                self.clip_loss(mod2_features, mod3_features, logit_scale) + \
+                self.clip_loss(mod1_features, mod3_features, logit_scale)
         fwd_dict['contrastive'] = contrastive_loss
 
         loss = log_px_zl + contrastive_loss
-
-        if self.modality_discriminative and self.training:
+        
+        if self.discriminative and self.training:
             mod1_preds = self.discriminator(mod1_features)
             mod2_preds = self.discriminator(mod2_features)
-            truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
-            discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
-            fwd_dict['mod_discriminative'] = discriminative_loss
+            mod3_preds = self.discriminator(mod3_features)
+            truth = torch.cat([
+                torch.zeros(mod1_features.shape[0], device=self.device),
+                torch.ones(mod2_features.shape[0], device=self.device),
+                2 * torch.ones(mod3_features.shape[0], device=self.device)]
+            ).to(torch.long)  # [0, ..., 0, 1, ..., 1, 2, ..., 2]
+            discriminative_loss = self.ce_loss(torch.cat([mod1_preds, mod2_preds, mod3_preds]).squeeze(-1), truth.squeeze(-1))
+            fwd_dict['discriminative'] = discriminative_loss
 
             loss = loss - discriminative_loss
 
-        if self.batch_discriminative and self.training:
-            batch_pred_1 = self.batch_discriminator(mod1_features)
-            batch_pred_2 = self.batch_discriminator(mod2_features)
-            truth = torch.cat([batch_indices, batch_indices])
-            batch_loss = self.ce_loss(torch.cat([batch_pred_1, batch_pred_2]).squeeze(-1), truth.squeeze(-1))
-            fwd_dict['batch_discriminative'] = batch_loss
-
-            loss = loss - batch_loss
-
         if self.distance_loss and self.training:
-            dist_loss = self.mse_loss(mod1_features, mod2_features)
+            dist_loss = self.mse_loss(mod1_features, mod2_features) + self.mse_loss(mod2_features, mod3_features)
             loss = loss + dist_loss
 
             fwd_dict['dist'] = dist_loss
 
         if self.variational and self.decode_features:
             uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
-            kl = _kl_powerspherical_uniform(z_dist, uni)
             # ps = PowerSpherical(mu, var.squeeze(-1))
-            # kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
+            kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni) + _kl_powerspherical_uniform(mod3_z_dist, uni)
             fwd_dict['KL'] = kl.mean()
             loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
         else:
@@ -475,102 +638,62 @@ class scCLIP(nn.Module):
             loss=loss,
             contrastive=fwd_dict['contrastive'],
             KL=fwd_dict['KL'],
-            nb=fwd_dict['nb'],
-            bernoulli=fwd_dict['bernoulli'],
+            loss1=fwd_dict['loss1'],
+            loss2=fwd_dict['loss2'],
+            loss3=fwd_dict['loss3'],
             temp=fwd_dict['temp'],
         )
-        if self.modality_discriminative and self.training:
-            record['modality_discriminative'] = fwd_dict['discriminative']
-        if self.batch_discriminative and self.training:
-            record['batch_loss'] = fwd_dict['batch_loss']
+        if self.discriminative and self.training:
+            record['discriminative'] = fwd_dict['discriminative']
         if self.distance_loss and self.training:
             record['dist'] = fwd_dict['dist']
         if self.loss_method == 'sigmoid':
             record['bias'] = fwd_dict['bias']
         record = {k: v.detach().item() for k, v in record.items()}
+ 
+        # if self.discriminative and self.training:
+            # return [loss, -discriminative_loss], fwd_dict, record
         return loss, fwd_dict, record
 
     def discriminative_forward(self, data_dict, hyper_param_dict):
         """
         Only get the discriminative loss
         """
-        if not self.modality_discriminative and not self.batch_discriminative:
+        if not self.discriminative:
             return None
         mod1_input = data_dict["cells_1_transformed"]
         mod2_input = data_dict["cells_2_transformed"]
-        batch_indices = data_dict.get('batch_indices', None)
+        mod3_input = data_dict["cells_3_transformed"]
 
         mod1_features = self.mod1_encoder(mod1_input)
         mod2_features = self.mod2_encoder(mod2_input)
+        mod3_features = self.mod3_encoder(mod3_input)
+
         mod1_mu, _ = mod1_features[:, :self.emb_dim], mod1_features[:, self.emb_dim:]
         mod2_mu, _ = mod2_features[:, :self.emb_dim], mod2_features[:, self.emb_dim:]
+        mod3_mu, _ = mod3_features[:, :self.emb_dim], mod3_features[:, self.emb_dim:]
 
         # L2 normalization
         mod1_features = F.normalize(mod1_mu)
         mod2_features = F.normalize(mod2_mu)
+        mod3_features = F.normalize(mod3_mu)
 
-        discriminative_loss = 0
-        if self.modality_discriminative:
-            mod1_preds = self.discriminator(mod1_features)
-            mod2_preds = self.discriminator(mod2_features)
-            truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
-            discriminative_loss = discriminative_loss + self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
-
-        batch_loss = 0
-        if self.batch_discriminative:
-            batch_pred_1 = self.batch_discriminator(mod1_features)
-            batch_pred_2 = self.batch_discriminator(mod2_features)
-            truth = torch.cat([batch_indices, batch_indices])
-            batch_loss = self.ce_loss(torch.cat([batch_pred_1, batch_pred_2]).squeeze(-1), truth.squeeze(-1))
-
-            discriminative_loss = discriminative_loss + batch_loss
+        mod1_preds = self.discriminator(mod1_features)
+        mod2_preds = self.discriminator(mod2_features)
+        mod3_preds = self.discriminator(mod3_features)
+        truth = torch.cat([
+            torch.zeros(mod1_features.shape[0], device=self.device),
+            torch.ones(mod2_features.shape[0], device=self.device),
+            2 * torch.ones(mod3_features.shape[0], device=self.device)]
+        ).to(torch.long)  # [0, ..., 0, 1, ..., 1, 2, ..., 2]
+        discriminative_loss = self.ce_loss(torch.cat([mod1_preds, mod2_preds, mod3_preds]).squeeze(-1), truth.squeeze(-1))
         return discriminative_loss
-
-    def train_step(self,
-        optimizers: List[optim.Optimizer],
-        data_dict: Mapping[str, torch.Tensor],
-        hyper_param_dict: Mapping[str, Any],
-        loss_update_callback: Union[None, Callable] = None
-    ) -> Mapping[str, torch.Tensor]:
-        """Executes a training step given a minibatch of data.
-
-        Set the model to train mode, run the forward pass, back propagate the
-        gradients, step the optimizer, return the record for this step.
-
-        Args:
-            optimizer: optimizer of the model parameters.
-            data_dict: a dict containing the current minibatch for training.
-            hyper_param_dict: a dict containing hyperparameters for the current
-                batch.
-            loss_update_callback: a callable that updates the loss and the
-                record dict.
-        
-        Returns:
-            A dict storing the record for this training step, which typically
-            includes decomposed loss terms, gradient norm, and other values we
-            care about.
-        """
-        self.train()
-        optimizers[0].zero_grad()
-        loss, fwd_dict, new_record = self(data_dict, hyper_param_dict)
-        if loss_update_callback is not None:
-            loss, new_record = loss_update_callback(loss, fwd_dict, new_record)
-        loss.backward()
-        norms = torch.nn.utils.clip_grad_norm_(self.parameters(), 50)
-        new_record['max_norm'] = norms.cpu().numpy()
-        optimizers[0].step()
-
-        if optimizers[1] is not None:
-            loss = self.discriminative_forward(data_dict, hyper_param_dict)
-            optimizers[1].zero_grad()
-            loss.backward()
-            optimizers[1].step()
-        return new_record
 
     def get_cell_embeddings_and_nll(
         self,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
+        adata_3: anndata.AnnData,
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
@@ -600,7 +723,7 @@ class scCLIP(nn.Module):
             emb_names = [emb_names]
 
         embs = {name: [] for name in emb_names}
-        hyper_param_dict = dict(decode=nlls is not None)
+        hyper_param_dict = dict(decode=nlls is not None, reconstruct_weight=1)
 
         def store_emb_and_nll(data_dict, fwd_dict):
             for name in emb_names:
@@ -610,7 +733,7 @@ class scCLIP(nn.Module):
                 nlls.append(fwd_dict['nll'].detach().item())
 
         self._apply_to(
-            adata_1, adata_2, batch_col, batch_size,
+            adata_1, adata_2, adata_3, batch_col, batch_size,
             raw_layer=raw_layer,
             transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
@@ -627,6 +750,7 @@ class scCLIP(nn.Module):
         if inplace:
             adata_1.obsm.update(embs)
             adata_2.obsm.update(embs)
+            adata_3.obsm.update(embs)
             return nll
         else:
             return embs, nll
@@ -634,6 +758,7 @@ class scCLIP(nn.Module):
     def _apply_to(self,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
+        adata_3: anndata.AnnData,
         batch_col: str = 'batch_indices',
         batch_size: int = 2000,
         raw_layer=None,
@@ -644,9 +769,11 @@ class scCLIP(nn.Module):
     ) -> None:
         """Docstring (TODO)
         """
-        sampler = CellSampler(
-            adata_1, adata_2,
+        sampler = TriCellSampler(
+            adata_1, adata_2, adata_3,
+            use_highly_variable=self.encode_hvar,
             require_raw=self.decode_features,
+            decode_highly_variable=self.decode_hvar,
             raw_layer=raw_layer,
             transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
@@ -673,10 +800,9 @@ class scCLIP(nn.Module):
         mu = mod1_features[:, :self.emb_dim]
         mu = F.normalize(mu)
         
-        if not self.decode_features:
-            return dict(mod1_features=mu, mod2_reconstruct=torch.zeros(mod1_input.shape))
 
         mod2_reconstruct = self.decode_mod2(mu, None, None, None, None, batch_indices, True)
+
         fwd_dict = dict(
             mod1_features=mu,
             mod2_reconstruct=mod2_reconstruct['mod2_reconstruct']
@@ -695,10 +821,9 @@ class scCLIP(nn.Module):
         mod2_features = self.mod2_encoder(mod2_input)
         mu = mod2_features[:, :self.emb_dim]
         mu = F.normalize(mu)
-        if not self.decode_features:
-            return dict(mod2_features=mu, mod1_reconstruct=torch.zeros(mod2_input.shape))
 
         mod1_reconstruct = self.decode_mod1(mu, None, None, None, None, batch_indices, True)
+        # mod2_reconstruct = self.mod2_decoder(mu)
 
         fwd_dict = dict(
             mod2_features=mu,
@@ -717,10 +842,12 @@ class scCLIP(nn.Module):
         """
         Predict from modality 1 to modality 2.
         """
-        hyper_param_dict = dict(decode=True)
-        sampler = CellSampler(
+        hyper_param_dict = dict(decode=True, reconstruct_weight=1)
+        sampler = TriCellSampler(
             adata_1,
             adata_1,  # We will ignore the second modality
+            use_highly_variable=self.encode_hvar,
+            decode_highly_variable=self.decode_hvar,
             transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
             batch_size=batch_size,
@@ -760,10 +887,12 @@ class scCLIP(nn.Module):
         """
         Predict from modality 2 to modality 1
         """
-        hyper_param_dict = dict(decode=True)
-        sampler = CellSampler(
+        hyper_param_dict = dict(decode=True, reconstruct_weight=1)
+        sampler = TriCellSampler(
             adata_2,
             adata_2,  # We will ignore the second modality
+            use_highly_variable=self.encode_hvar,
+            decode_highly_variable=self.decode_hvar,
             transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
             batch_size=batch_size,
@@ -790,34 +919,6 @@ class scCLIP(nn.Module):
             return None
         else:
             return embs
-
-    def predict_iterative(self,
-        adata,
-        transformed_obsm: str,  # something like X_pca
-        embedding: str = 'mod1_features',
-        num_iter: int = 100,
-        batch_size: int = 10000,
-        batch_col: str = 'batch_indices'
-    ):
-        """
-        Predict mod2 features from mod1_features iteratively
-        """
-        mod1_features = torch.Tensor(adata.obsm[embedding])
-        mod2_pred = torch.nn.Parameter(torch.rand(adata.obsm[transformed_obsm].shape))
-
-        self.eval()
-        optimizer = torch.optim.SGD([mod2_pred], lr=0.005)
-
-        epoch = 0
-        while epoch < num_iter:
-            optimizer.zero_grad()
-            mod2_features = F.normalize(self.mod2_encoder(mod2_pred))
-            loss = -torch.sum(mod1_features * mod2_features, dim=-1).mean()
-            loss.backward()
-            optimizer.step()
-            epoch += 1
-        
-        return mod2_pred.cpu().detach().numpy()
 
 
 class HypersphericalUniform(torch.distributions.Distribution):

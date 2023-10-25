@@ -3,3 +3,5 @@ notebooks/
 *.pyc
 *.txt
 *.pbs
+libraries/
+*/__pycache__

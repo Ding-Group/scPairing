@@ -10,11 +10,11 @@ import numpy as np
 import anndata
 import torch
 from torch import optim
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 
-from batch_sampler import CellSampler
+from batch_sampler import CellSampler, TriCellSampler
 from eval_utils import evaluate
-from models import BaseCellModel, scETM
+from models import BaseCellModel
 from logging_utils import initialize_logger, log_arguments
 from .trainer_utils import train_test_split, train_test_split_cite, set_seed, _stats_recorder
 
@@ -66,6 +66,7 @@ class UnsupervisedTrainer:
         model: BaseCellModel,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
+        adata_3: Optional[anndata.AnnData] = None,
         raw_layer: Optional[Union[str, List[str]]] = None,
         transformed_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
@@ -75,10 +76,7 @@ class UnsupervisedTrainer:
         init_lr: float = 5e-3,
         lr_decay: float = 6e-5,
         weight_decay: float = 0.,
-        logit_weight_decay: float = 0.,
         batch_size: int = 2000,
-        use_highly_variable: bool = False,
-        decode_highly_variable: bool = False,
         train_instance_name: str = "scCLIP",
         restore_epoch: int = 0,
         seed: int = -1,
@@ -89,6 +87,7 @@ class UnsupervisedTrainer:
             model: the model to be trained.
             adata_1: the intact single-cell dataset (first modality).
             adata_2: the intact single-cell dataset (second modality).
+            adata_3: the intact single-cell dataset (third modality), if there is one.
             raw_layer: layer corresponding to raw counts.
             transformed_layer: layer corresponding to transformed counts.
             transformed_obsm: key in obsm corresponding to transformed data.
@@ -115,6 +114,7 @@ class UnsupervisedTrainer:
 
         self.train_adata_1 = self.test_adata_1 = self.adata_1 = adata_1
         self.train_adata_2 = self.test_adata_2 = self.adata_2 = adata_2
+        self.train_adata_3 = self.test_adata_3 = self.adata_3 = adata_3
         if test_ratio > 0:
             self.train_adata_1, self.test_adata_1, self.train_adata_2, self.test_adata_2 = \
                 train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
@@ -124,19 +124,25 @@ class UnsupervisedTrainer:
         assert not (transformed_layer is not None and transformed_obsm is not None), "Only one of transformed_layer and transformed_obsm should be given"
         self.transformed_layer = transformed_layer
         self.transformed_obsm = transformed_obsm
-        self.use_highly_variable = use_highly_variable
-        self.decode_highly_variable = decode_highly_variable
+
+        no_decay = list()
+        decay = list()
+        discriminator_params = list()
+        for name, m in model.named_parameters():
+            if 'decoder' in name and 'discriminator' not in name:
+                decay.append(m)
+            elif 'discriminator' not in name:
+                no_decay.append(m)
+            else:
+                discriminator_params.append(m)
         self.optimizer = optim.Adam([
-                {'params': model.mod1_encoder.parameters()},
-                {'params': model.mod2_encoder.parameters()},
-                {'params': model.mean_encoder.parameters()},
-                {'params': model.var_encoder.parameters()},
-                {'params': model.logit_scale, 'weight_decay': logit_weight_decay},
-                {'params': model.mod1_decoder.parameters(), 'weight_decay': weight_decay},
-                {'params': model.mod2_decoder.parameters(), 'weight_decay': weight_decay}
+                {'params': no_decay},
+                {'params': decay, 'weight_decay': weight_decay}
             ],
             lr=init_lr,
         )
+        self.discriminator_optimizer = optim.Adam(discriminator_params) if len(discriminator_params) > 0 else None
+
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
@@ -214,22 +220,6 @@ class UnsupervisedTrainer:
             return max(min(1., epoch / fully_warmup_epoch) * max_weight, min_weight)
         else:
             return max_weight
-    
-    @staticmethod
-    def _calc_cutoff(
-        epoch: int,
-        n_epochs: int,
-        flip_contrastive_reconstruct: float
-    ) -> Tuple[int]:
-        """
-        Calculates the weight of contrastive and reconstruction losses.
-        The weights are either (1, 0) or (0, 1), the first occuring before
-        the cutoff and the latter occuring after.
-        """
-        if epoch <= n_epochs * flip_contrastive_reconstruct:
-            return (0, 1)
-        else:
-            return (1, 0)
 
     def update_step(self, jump_to_step: Union[None, int] = None) -> None:
         """Aligns the current step, epoch and lr to the given step number.
@@ -257,21 +247,16 @@ class UnsupervisedTrainer:
         n_epochs: int = 800,
         eval_every: int = 200,
         n_samplers: int = 4,
-        kl_warmup_ratio: float = 1/3,
+        need_reconstruction: bool = True,
+        kl_warmup_ratio: float = 0.,
         min_kl_weight: float = 0.,
-        max_kl_weight: float = 1e-7,
-        reconstruct_warmup_ratio: float = 0,
-        reconstruct_cutoff_ratio: float = 0.,
-        min_reconstruct_weight: float = 0.,
-        max_reconstruct_weight: float = 0.5,
-        flip_contrastive_reconstruct: float = 0,
-        flip_clip_dist: float = 0,
+        max_kl_weight: float = 1e-5,
         eval: bool = True,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
         ping_every: Optional[int] = None,
         record_log_path: Union[str, None] = None,
-        writer: Union[None, SummaryWriter] = None,
+        writer = None,
         eval_result_log_path: Union[str, None] = None,
         eval_kwargs: Union[None, dict] = None,
         **train_kwargs
@@ -308,34 +293,48 @@ class UnsupervisedTrainer:
                 clip loss to distance-based loss.
         """
 
-        default_eval_kwargs = dict(
-            batch_col = batch_col,
-            plot_fname = f'{self.train_instance_name}_{self.model.clustering_input}',
-            plot_dir = self.ckpt_dir,
-            writer = writer
-        )
-        if eval_kwargs is not None:
-            default_eval_kwargs.update(eval_kwargs)
-        eval_kwargs = default_eval_kwargs
+        # default_eval_kwargs = dict(
+        #     batch_col = batch_col,
+        #     plot_fname = f'{self.train_instance_name}_{self.model.clustering_input}',
+        #     plot_dir = self.ckpt_dir,
+        #     writer = writer
+        # )
+        # if eval_kwargs is not None:
+        #     default_eval_kwargs.update(eval_kwargs)
+        # eval_kwargs = default_eval_kwargs
 
         if ping_every is None:
             ping_every = n_epochs
         
         # set up sampler and dataloader
         # if n_samplers == 1 or self.batch_size >= self.train_adata_1.n_obs:
-        sampler = CellSampler(
-            self.train_adata_1,
-            self.train_adata_2,
-            self.batch_size,
-            raw_layer=self.raw_layer,
-            transformed_layer=self.transformed_layer,
-            transformed_obsm=self.transformed_obsm,
-            use_highly_variable=self.use_highly_variable,
-            decode_highly_variable=self.decode_highly_variable,
-            sample_batch_id=self.model.need_batch,
-            n_epochs=n_epochs - self.epoch,
-            batch_col=batch_col
-        )
+        if self.adata_3 is None:
+            sampler = CellSampler(
+                self.train_adata_1,
+                self.train_adata_2,
+                self.batch_size,
+                require_raw=need_reconstruction,
+                raw_layer=self.raw_layer,
+                transformed_layer=self.transformed_layer,
+                transformed_obsm=self.transformed_obsm,
+                sample_batch_id=self.model.need_batch,
+                n_epochs=n_epochs - self.epoch,
+                batch_col=batch_col
+            )
+        else:
+            sampler = TriCellSampler(
+                self.train_adata_1,
+                self.train_adata_2,
+                self.train_adata_3,
+                self.batch_size,
+                require_raw=need_reconstruction,
+                raw_layer=self.raw_layer,
+                transformed_layer=self.transformed_layer,
+                transformed_obsm=self.transformed_obsm,
+                sample_batch_id=self.model.need_batch,
+                n_epochs=n_epochs - self.epoch,
+                batch_col=batch_col
+            )
         # else:
         #     sampler = MultithreadedCellSampler(self.train_adata, self.batch_size, n_samplers = n_samplers, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         dataloader = iter(sampler)
@@ -345,7 +344,10 @@ class UnsupervisedTrainer:
             log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
         else:
             log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
-            log_file.write("Epoch,Contrastive,obj,nb,bernoulli,temp\n")
+            if self.adata_3 is None:
+                log_file.write("Epoch,Contrastive,obj,nb,bernoulli,temp\n")
+            else:
+                log_file.write("Epoch,Contrastive,obj,loss1,loss2,loss3,temp\n")
         recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
         next_ping_epoch = min(int(np.ceil(self.epoch / ping_every) * ping_every), n_epochs)
@@ -357,15 +359,15 @@ class UnsupervisedTrainer:
             # Train one epoch
             new_record, hyper_param_dict = self.do_train_step(dataloader,
                 n_epochs = n_epochs,
-                reconstruct_cutoff_ratio=reconstruct_cutoff_ratio,
-                reconstruct_warmup_ratio=reconstruct_warmup_ratio,
-                min_reconstruct_weight=min_reconstruct_weight,
-                max_reconstruct_weight=max_reconstruct_weight,
-                flip_contrastive_reconstruct=flip_contrastive_reconstruct,
-                flip_clip_dist=flip_clip_dist,
+                kl_warmup_ratio=kl_warmup_ratio,
+                min_kl_weight=min_kl_weight,
+                max_kl_weight=max_kl_weight,
                 **train_kwargs
             )
-            log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["nb"]},{new_record["bernoulli"]},{new_record["temp"]}\n')
+            if self.adata_3 is None:
+                log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["nb"]},{new_record["bernoulli"]},{new_record["temp"]}\n')
+            else:
+                log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["loss1"]},{new_record["loss2"]},{new_record["loss3"]},{new_record["temp"]}\n')
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
 
@@ -389,17 +391,6 @@ class UnsupervisedTrainer:
                         _logger.info(f'test nll: {test_nll:7.4f}')
                 else:
                     test_nll = None
-                
-                if eval:
-                    # get embeddings, evaluate and log results
-                    current_eval_kwargs = eval_kwargs.copy()
-                    current_eval_kwargs['plot_fname'] = current_eval_kwargs['plot_fname'] + f'_epoch{int(next_ckpt_epoch)}'
-                    self.before_eval(batch_col=batch_col)
-                    # if isinstance(self.model, scETM):
-                        # self.model.write_topic_gene_embeddings_to_tensorboard(writer, self.adata.var_names, f'gene_topic_emb_epoch{int(next_ckpt_epoch)}')
-                    result = evaluate(adata = self.adata_1, embedding_key = self.model.clustering_input, **current_eval_kwargs)
-                    result['test_nll'] = test_nll
-                    self._log_eval_result(result, next_ckpt_epoch, writer, eval_result_log_path)
 
                 if next_ckpt_epoch and save_model_ckpt and self.ckpt_dir is not None:
                     # checkpointing
@@ -426,70 +417,19 @@ class UnsupervisedTrainer:
         for attr, fname in self.attr_fname.items():
             torch.save(getattr(self, attr).state_dict(), os.path.join(self.ckpt_dir, f'{fname}-{next_ckpt_epoch}'))
 
-    def _log_eval_result(self,
-        result: Mapping[str, Union[float, None, Figure]],
-        next_ckpt_epoch: int,
-        writer: Union[None, SummaryWriter],
-        eval_result_log_path: Union[str, None] = None
-    ) -> None:
-        """Docstring (TODO)
-        """
-        if writer is not None:
-            for k, v in result.items():
-                if isinstance(v, float):
-                    writer.add_scalar(k, v, next_ckpt_epoch)
-        if eval_result_log_path is not None:
-            with open(eval_result_log_path, 'a+') as f:
-                # ckpt_dir, epoch, test_nll, ari, nmi, k_bet, ebm, time, seed
-                f.write(f'{Path(self.ckpt_dir).name}\t'
-                        f'{next_ckpt_epoch}\t'
-                        f'{result["test_nll"]}\t'
-                        f'{result["ari"]}\t'
-                        f'{result["nmi"]}\t'
-                        f'{result["k_bet"]}\t'
-                        f'{result["ebm"]}\t'
-                        f'{time.strftime("%m_%d-%H_%M_%S")}\t'
-                        f'{self.seed}\n')
-
     def do_train_step(self, dataloader, **kwargs) -> Mapping[str, torch.Tensor]:
         """Docstring (TODO)
         """
 
         # construct hyper_param_dict
         hyper_param_dict = {
-            # 'kl_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, kwargs['kl_warmup_ratio'], kwargs['min_kl_weight'], kwargs['max_kl_weight'])
+            'kl_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, kwargs['kl_warmup_ratio'], kwargs['min_kl_weight'], kwargs['max_kl_weight'])
         }
-        if kwargs['reconstruct_warmup_ratio']:
-            hyper_param_dict['reconstruct_weight'] = self._calc_weight(
-                self.epoch, kwargs['n_epochs'], kwargs['reconstruct_cutoff_ratio'], kwargs['reconstruct_warmup_ratio'],
-                kwargs['min_reconstruct_weight'], kwargs['max_reconstruct_weight']
-            )
-        if kwargs['flip_contrastive_reconstruct']:
-            hyper_param_dict['reconstruct_weight'], hyper_param_dict['contrastive_weight'] = self._calc_cutoff(
-                self.epoch, kwargs['n_epochs'], kwargs['flip_contrastive_reconstruct']
-            )
-        
-        if kwargs['flip_clip_dist']:
-            hyper_param_dict['use_dist'], hyper_param_dict['use_contrastive'] = self._calc_cutoff(
-                self.epoch, kwargs['n_epochs'], kwargs['flip_clip_dist']
-            )
 
         # construct data_dict
         data_dict = {k: v.to(self.device) for k, v in next(dataloader).items()}
 
         # train for one step, record tracked items (e.g. loss)
-        new_record = self.model.train_step(self.optimizer, data_dict, hyper_param_dict)
+        new_record = self.model.train_step([self.optimizer, self.discriminator_optimizer] , data_dict, hyper_param_dict)
 
         return new_record, hyper_param_dict
-
-    def before_eval(self, batch_col: str, **kwargs) -> None:
-        """Docstring (TODO)
-        """
-
-        self.model.get_cell_embeddings_and_nll(
-            self.adata_1, self.adata_2, self.batch_size,
-            transformed_layer=self.transformed_layer,
-            transformed_obsm=self.transformed_obsm,
-            batch_col=batch_col, emb_names=self.model.emb_names
-        )
-
