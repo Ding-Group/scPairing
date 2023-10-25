@@ -121,7 +121,8 @@ class UnsupervisedTrainer:
         
         self.raw_layer = raw_layer
 
-        assert not (transformed_layer is not None and transformed_obsm is not None), "Only one of transformed_layer and transformed_obsm should be given"
+        if transformed_layer is not None and transformed_obsm is not None:
+            raise ValueError("Only one of transformed_layer and transformed_obsm should be given")
         self.transformed_layer = transformed_layer
         self.transformed_obsm = transformed_obsm
 
@@ -246,19 +247,15 @@ class UnsupervisedTrainer:
     def train(self,
         n_epochs: int = 800,
         eval_every: int = 200,
-        n_samplers: int = 4,
         need_reconstruction: bool = True,
         kl_warmup_ratio: float = 0.,
         min_kl_weight: float = 0.,
         max_kl_weight: float = 1e-5,
-        eval: bool = True,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
         ping_every: Optional[int] = None,
         record_log_path: Union[str, None] = None,
         writer = None,
-        eval_result_log_path: Union[str, None] = None,
-        eval_kwargs: Union[None, dict] = None,
         **train_kwargs
     ) -> None:
         """Trains the model, optionally evaluates performance and logs results.
@@ -292,17 +289,6 @@ class UnsupervisedTrainer:
             flip_clip_dist: proporition of epochs at which to switch from training using
                 clip loss to distance-based loss.
         """
-
-        # default_eval_kwargs = dict(
-        #     batch_col = batch_col,
-        #     plot_fname = f'{self.train_instance_name}_{self.model.clustering_input}',
-        #     plot_dir = self.ckpt_dir,
-        #     writer = writer
-        # )
-        # if eval_kwargs is not None:
-        #     default_eval_kwargs.update(eval_kwargs)
-        # eval_kwargs = default_eval_kwargs
-
         if ping_every is None:
             ping_every = n_epochs
         
@@ -335,8 +321,6 @@ class UnsupervisedTrainer:
                 n_epochs=n_epochs - self.epoch,
                 batch_col=batch_col
             )
-        # else:
-        #     sampler = MultithreadedCellSampler(self.train_adata, self.batch_size, n_samplers = n_samplers, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         dataloader = iter(sampler)
         
         # set up the stats recorder
@@ -407,8 +391,6 @@ class UnsupervisedTrainer:
         log_file.close()
         del recorder
         _logger.info("Optimization Finished: %s" % self.ckpt_dir)
-        # if isinstance(sampler, MultithreadedCellSampler):
-        #     sampler.join(0.1)
 
     def save_model_and_optimizer(self, next_ckpt_epoch: int) -> None:
         """Docstring (TODO)

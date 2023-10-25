@@ -18,7 +18,7 @@ from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import KFold
 
-def main(config):
+def main(config, seed=0):
     files = config['files']
     model_params = config['model_params']
     trainer_params = config['trainer_params']
@@ -30,36 +30,39 @@ def main(config):
     mod1_adata = ad.concat([ad.read_h5ad(f) for f in mod1_files], label="batch_indices", merge='same')
     mod2_adata = ad.concat([ad.read_h5ad(f) for f in mod2_files], label="batch_indices", merge='same')
 
-    mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable]
+    mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable].copy()
     sc.pp.filter_genes(mod2_adata, min_cells=mod2_adata.shape[0] * 0.01)
 
     if trainer_params.get('transformed_obsm', None):
         if isinstance(trainer_params['transformed_obsm'], str):
             trainer_params['transformed_obsm'] = [trainer_params['transformed_obsm'], trainer_params['transformed_obsm']]
-        mod1_nvars = mod1_adata.obsm[trainer_params['transformed_obsm'][0]].shape[1]
-        mod2_nvars = mod2_adata.obsm[trainer_params['transformed_obsm'][1]].shape[1]
+        mod1_input = mod1_adata.obsm[trainer_params['transformed_obsm'][0]].shape[1]
+        mod2_input = mod2_adata.obsm[trainer_params['transformed_obsm'][1]].shape[1]
     else:
-        mod1_nvars = mod1_adata.n_vars
-        mod2_nvars = mod2_adata.n_vars
+        mod1_input = mod1_adata.n_vars
+        mod2_input = mod2_adata.n_vars
 
         sc.pp.scale(mod1_adata, max_value=10)
         sc.pp.scale(mod2_adata, max_value=10)
+    
+    print("Number of batches:", mod1_adata.obs[batch_col].nunique())
 
     model = scCLIP(
-        mod1_nvars,
-        mod2_nvars,
-        np.sum(mod1_adata.var.highly_variable) if trainer_params['highly_variable'] else mod1_nvars,
-        np.sum(mod2_adata.var.highly_variable) if trainer_params['highly_variable'] else mod2_nvars,
+        mod1_input,  # n_mod1_input
+        mod2_input,  # n_mod2_input
+        mod1_adata.n_vars,  # n_mod1_var
+        mod2_adata.n_vars,  # n_mod2_var
         n_batches=mod1_adata.obs[batch_col].nunique(),
-        mod2_type='atac',
+        mod2_type=model_params.get('mod2_type', 'atac'),
         emb_dim=model_params['emb_dim'],
-        hidden_dims=model_params['hidden_dims'],
+        encoder_hidden_dims=model_params['hidden_dims'],
+        decoder_hidden_dims=model_params['hidden_dims'],
         variational=model_params.get('variational', False),
-        decode_features=model_params['decode_features'],
+        use_decoder=model_params['decode_features'],
         combine_method=model_params.get('decode_method', 'dropout'),
-        dropout_in_eval=model_params.get('dropout_in_eval', True),
         modality_discriminative=model_params.get('modality_discriminative', False),
         batch_discriminative=model_params.get('batch_discriminative', False),
+        batch_dispersion=model_params.get('batch_dispersion', False),
         distance_loss=model_params.get('distance_loss', False),
         loss_method=model_params.get('loss_method', 'clip'),
         tau=model_params.get('tau', 0.1),
@@ -67,6 +70,7 @@ def main(config):
         downsample_clip_prob=model_params.get('downsample_clip_prob', 0.5),
         set_temperature=model_params.get('set_temperature', None),
         cap_temperature=model_params.get('cap_temperature', None),
+        seed=seed
     )
 
     trainer = UnsupervisedTrainer(
@@ -135,8 +139,5 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-
     config = yaml.safe_load(Path(args.path).read_text())
-    main(config)
+    main(config, args.seed)

@@ -11,6 +11,7 @@ model_params:
   decode_method: dropout
   modality_discriminative: True
   batch_discriminative: False
+  batch_dispersion: True
   variational: True
   distance_loss: False
   loss_method: clip
@@ -22,7 +23,6 @@ trainer_params:
   raw_layer:
     - counts
     - binary
-  transformed_layer:
   transformed_obsm:
     - X_scVI
     - X_PeakVI

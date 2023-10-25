@@ -10,15 +10,20 @@ model_params:
   decode_features: True
   decode_method: dropout
   modality_discriminative: False
+  variational: True
   loss_method: clip
+  mod2_type: protein
 trainer_params:
   n_epochs: 600
   eval_every: 300
   ping_every: 100
   raw_layer:
     - raw
-    - binary
+    - raw
   transformed_layer:
+  transformed_obsm:
+    - X_pca
+    - X_pca
   batch_size: 1000
   weight_decay: 0.01
 cell_type_col: cell_type
