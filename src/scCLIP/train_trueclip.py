@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import pickle
 sys.path.append('/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/src/scCLIP')
 
 os.environ[ 'NUMBA_CACHE_DIR' ] = '/scratch/st-jiaruid-1/yinian/tmp/' # https://github.com/scverse/scanpy/issues/2113
@@ -45,8 +46,6 @@ def main(config, seed=0):
         sc.pp.scale(mod1_adata, max_value=10)
         sc.pp.scale(mod2_adata, max_value=10)
     
-    print("Number of batches:", mod1_adata.obs[batch_col].nunique())
-
     model = scCLIP(
         mod1_input,  # n_mod1_input
         mod2_input,  # n_mod2_input
@@ -92,6 +91,7 @@ def main(config, seed=0):
         n_epochs=trainer_params['n_epochs'],
         eval_every=trainer_params['eval_every'],
         batch_col=batch_col,
+        need_reconstruction=model_params['decode_features'],
         ping_every=trainer_params.get('ping_every', None),
         eval_kwargs=dict(cell_type_col=config['cell_type_col']),
         n_samplers=1,
@@ -101,32 +101,20 @@ def main(config, seed=0):
 
     emb_names = ['mod1_features', 'mod2_features']
     if model_params.get('decode_features', False) and config.get('reconstruct', False):
-        emb_names += ['mod1_reconstruct', 'mod2_reconstruct']
+        emb_names += ['mod1_reconstruct']
     nll = model.get_cell_embeddings_and_nll(
         mod1_adata, mod2_adata, emb_names=emb_names,
         raw_layer=trainer_params.get('raw_layer', None),
         transformed_obsm=trainer_params.get('transformed_obsm', None),
         batch_size=1000, inplace=True
     )
-    mod1_adata.write(os.path.join(trainer.ckpt_dir, 'final.h5ad'))
-
-    # with open(os.path.join(trainer.ckpt_dir, 'knn.txt'), 'w') as f:
-    #     X = mod1_adata.obsm['mod1_features']
-    #     y = mod1_adata.obs[config['cell_type_col']]
-
-    #     kf = KFold(n_splits=10)
-
-    #     for n in [5, 17, 29, 41, 53, 65]:
-    #         vals = []
-    #         for i, (train_index, test_index) in enumerate(kf.split(X)):
-    #             train_X, train_y = X[train_index], y[train_index]
-    #             test_X, test_y = X[test_index], y[test_index]
-    #             neigh = KNeighborsClassifier(n_neighbors=n)
-    #             neigh.fit(train_X, train_y)
-
-    #             pred_y = neigh.predict(test_X)
-    #             vals.append(np.sum(pred_y == test_y) / len(test_y))
-    #         f.write(f'n={n}, Average={sum(vals) / len(vals)}\n')
+    save = {
+        'mod1_features': mod1_adata.obsm['mod1_features'],
+        'mod2_features': mod1_adata.obsm['mod2_features'],
+        'mod1_reconstruct': mod1_adata.obsm['mod1_reconstruct']
+    }
+    with open(os.path.join(trainer.ckpt_dir, 'embs.pkl'), 'wb') as f:
+        pickle.dump(save, f)
 
 
 if __name__ == '__main__':

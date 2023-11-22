@@ -328,10 +328,6 @@ class UnsupervisedTrainer:
             log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
         else:
             log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
-            if self.adata_3 is None:
-                log_file.write("Epoch,Contrastive,obj,nb,bernoulli,temp\n")
-            else:
-                log_file.write("Epoch,Contrastive,obj,loss1,loss2,loss3,temp\n")
         recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
         next_ping_epoch = min(int(np.ceil(self.epoch / ping_every) * ping_every), n_epochs)
@@ -348,10 +344,9 @@ class UnsupervisedTrainer:
                 max_kl_weight=max_kl_weight,
                 **train_kwargs
             )
-            if self.adata_3 is None:
-                log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["nb"]},{new_record["bernoulli"]},{new_record["temp"]}\n')
-            else:
-                log_file.write(f'{self.epoch},{new_record["contrastive"]},{new_record["KL"]},{new_record["loss1"]},{new_record["loss2"]},{new_record["loss3"]},{new_record["temp"]}\n')
+            if self.epoch == 0:
+                log_file.write(','.join(['epoch'] + list(new_record.keys())) + '\n')
+            log_file.write(','.join(map(str, [self.epoch] + list(new_record.values()))) + '\n')
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
 
@@ -406,6 +401,7 @@ class UnsupervisedTrainer:
         # construct hyper_param_dict
         hyper_param_dict = {
             'kl_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, kwargs['kl_warmup_ratio'], kwargs['min_kl_weight'], kwargs['max_kl_weight'])
+            # 'batch_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, 1, 1, 100)
         }
 
         # construct data_dict

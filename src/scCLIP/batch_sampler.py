@@ -222,8 +222,8 @@ class CellSampler():
             if not self.require_raw:
                 cells_1 = cells_2 = torch.zeros([])
             else:
-                X_1 = self.X_1[batch, :]
-                X_2 = self.X_2[batch, :]
+                X_1 = self.X_1[batch]
+                X_2 = self.X_2[batch]
 
                 if isinstance(X_1, spmatrix):
                     cells_1 = torch.FloatTensor(X_1.todense())
@@ -234,8 +234,8 @@ class CellSampler():
                 else:
                     cells_2 = torch.FloatTensor(X_2)
 
-            X_1_transformed = self.X_1_transformed[batch, :]
-            X_2_transformed = self.X_2_transformed[batch, :]
+            X_1_transformed = self.X_1_transformed[batch]
+            X_2_transformed = self.X_2_transformed[batch]
             if isinstance(X_1_transformed, spmatrix):
                 X_1_transformed = torch.FloatTensor(X_1_transformed.todense())
             else:
