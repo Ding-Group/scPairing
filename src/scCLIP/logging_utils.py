@@ -50,7 +50,7 @@ def initialize_logger(ckpt_dir=None, level=logging.INFO, logger=None) -> None:
         logger: the provided logger to be configured.
     """
     if logger is None:
-        logger = logging.getLogger('scETM')
+        logger = logging.getLogger()
     logger.setLevel(level)
     if logger.hasHandlers():
         for handler in logger.handlers:

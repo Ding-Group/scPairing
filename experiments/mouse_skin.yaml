@@ -20,10 +20,9 @@ trainer_params:
   ping_every: 50
   highly_variable: True
   decode_highly_variable: True
-  raw_layer:
+  counts_layer:
     - raw
     - binary
-  transformed_layer:
   transformed_obsm:
     - X_scVI
     - X_PeakVI

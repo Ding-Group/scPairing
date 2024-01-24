@@ -76,8 +76,7 @@ def main(config, seed=0):
         model,
         mod1_adata,
         mod2_adata,
-        raw_layer=trainer_params.get('raw_layer', None),
-        transformed_layer=trainer_params.get('transformed_layer', None),
+        counts_layer=trainer_params.get('counts_layer', None),
         transformed_obsm=trainer_params.get('transformed_obsm', None),
         weight_decay=trainer_params.get('weight_decay', 0),
         ckpt_dir=config['ckpt_dir'],
@@ -104,7 +103,7 @@ def main(config, seed=0):
         emb_names += ['mod1_reconstruct']
     nll = model.get_cell_embeddings_and_nll(
         mod1_adata, mod2_adata, emb_names=emb_names,
-        raw_layer=trainer_params.get('raw_layer', None),
+        counts_layer=trainer_params.get('counts_layer', None),
         transformed_obsm=trainer_params.get('transformed_obsm', None),
         batch_size=1000, inplace=True
     )

@@ -15,10 +15,9 @@ trainer_params:
   n_epochs: 1200
   eval_every: 300
   ping_every: 100
-  raw_layer:
+  counts_layer:
     - raw
     - binary
-  transformed_layer:
   transformed_obsm:
     - X_pca
     - X_lsi

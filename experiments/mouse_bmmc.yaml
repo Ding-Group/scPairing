@@ -16,10 +16,9 @@ model_params:
 trainer_params:
   n_epochs: 600
   eval_every: 300
-  raw_layer:
+  counts_layer:
     - raw
     - binary
-  transformed_layer:
   batch_size: 5000
 cell_type_col: celltype
 reconstruct: True

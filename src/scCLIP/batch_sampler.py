@@ -38,11 +38,10 @@ class CellSampler():
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
         batch_size: int,
-        raw_layer: Optional[Union[str, List[str]]] = None,
-        transformed_layer: Optional[Union[str, List[str]]] = None,
+        counts_layer: List[Union[str, None]] = [None, None],
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         sample_batch_id: bool = False,
-        require_raw: bool = True,
+        require_counts: bool = True,
         n_epochs: Union[float, int] = np.inf,
         rng: Union[None, np.random.Generator] = None,
         batch_col: str = 'batch_indices',
@@ -54,14 +53,12 @@ class CellSampler():
             adata_1: an AnnData object storing the dataset of the first modality.
             adata_2: an AnnData object storing the dataset of the second modality.
             batch_size: size of each sampled minibatch.
-            raw_layer: AnnData layer corresponding to raw counts. If it is a singular str,
-                the same raw_layer will be applied to both AnnDatas. If it is a list,
+            counts_layer: AnnData layer corresponding to raw counts. If it is a singular str,
+                the same counts_layer will be applied to both AnnDatas. If it is a list,
                 the first will be applied to adata_1, second applied to adata_2
-            transformed_layer: AnnData layer corresponding to transformed counts.
-                Same premise as raw_layer.
             transformed_obsm: AnnData obsm key corresponding to transformed data.
             sample_batch_id: whether to yield batch indices in each sample.
-            require_raw: Whether the raw counts are required by the model. The raw counts are not needed
+            require_counts: Whether the raw counts are required by the model. The raw counts are not needed
                 if the model is not going to decode anything
             n_epochs: number of epochs to sample before raising StopIteration.
             rng: the random number generator.
@@ -74,19 +71,16 @@ class CellSampler():
         Assumption that adata_1 and adata_2 have the same cells in the same order.
         """
         assert adata_1.n_obs == adata_2.n_obs, "The two AnnData objects have a different number of observations"
-        assert transformed_obsm is None or transformed_layer is None
         self.n_cells: int = adata_1.n_obs
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
-        self.require_raw: bool = require_raw
+        self.require_counts: bool = require_counts
 
-        if isinstance(raw_layer, str) or raw_layer is None:
-            raw_layer = [raw_layer, raw_layer]
-        # if isinstance(transformed_layer, str) or transformed_layer is None:
-        #     transformed_layer = [transformed_layer, transformed_layer]
+        if isinstance(counts_layer, str) or counts_layer is None:
+            counts_layer = [counts_layer, counts_layer]
 
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer[0]] if raw_layer[0] else adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer[1]] if raw_layer[1] else adata_2.X
+        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[counts_layer[0]] if counts_layer[0] else adata_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[counts_layer[1]] if counts_layer[1] else adata_2.X
 
         self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
         self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
@@ -100,12 +94,7 @@ class CellSampler():
         self.library_size_1: Union[spmatrix, np.ndarray] = self.X_1.sum(1) if self.is_sparse_1 else self.X_1.sum(1, keepdims=True)
         self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1) if self.is_sparse_2 else self.X_2.sum(1, keepdims=True)
 
-        if transformed_layer is not None:
-            if isinstance(transformed_layer, str):
-                transformed_layer = [transformed_layer, transformed_layer]
-            self.X_1_transformed = adata_1.layers[transformed_layer[0]] if transformed_layer[0] else adata_1.X
-            self.X_2_transformed = adata_2.layers[transformed_layer[1]] if transformed_layer[1] else adata_2.X
-        elif transformed_obsm is not None:
+        if transformed_obsm is not None:
             if isinstance(transformed_obsm, str):
                 transformed_obsm = [transformed_obsm, transformed_obsm]
             self.X_1_transformed = adata_1.obsm[transformed_obsm[0]] if transformed_obsm[0] else adata_1.X
@@ -152,14 +141,14 @@ class CellSampler():
 
         count = 0
 
-        if not self.require_raw:
+        if not self.require_counts:
             X_1 = torch.zeros([])
         elif isinstance(self.X_1, spmatrix):
             X_1 = torch.FloatTensor(self.X_1.todense())
         else:
             X_1 = torch.FloatTensor(self.X_1)
         
-        if not self.require_raw:
+        if not self.require_counts:
             X_2 = torch.zeros([])
         elif isinstance(self.X_2, spmatrix):
             X_2 = torch.FloatTensor(self.X_2.todense())
@@ -219,7 +208,7 @@ class CellSampler():
             library_size_1 = torch.FloatTensor(self.library_size_1[batch])
             library_size_2 = torch.FloatTensor(self.library_size_2[batch])
 
-            if not self.require_raw:
+            if not self.require_counts:
                 cells_1 = cells_2 = torch.zeros([])
             else:
                 X_1 = self.X_1[batch]
@@ -287,11 +276,10 @@ class TriCellSampler():
         adata_2: anndata.AnnData,
         adata_3: anndata.AnnData,
         batch_size: int,
-        raw_layer: Optional[Union[str, List[str]]] = None,
-        transformed_layer: Optional[Union[str, List[str]]] = None,
+        counts_layer: List[Union[str, None]] = [None, None, None],
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         sample_batch_id: bool = False,
-        require_raw: bool = True,
+        require_counts: bool = True,
         n_epochs: Union[float, int] = np.inf,
         rng: Union[None, np.random.Generator] = None,
         batch_col: str = 'batch_indices',
@@ -303,14 +291,12 @@ class TriCellSampler():
             adata_1: an AnnData object storing the dataset of the first modality.
             adata_2: an AnnData object storing the dataset of the second modality.
             batch_size: size of each sampled minibatch.
-            raw_layer: AnnData layer corresponding to raw counts. If it is a singular str,
-                the same raw_layer will be applied to both AnnDatas. If it is a list,
+            counts_layer: AnnData layer corresponding to raw counts. If it is a singular str,
+                the same counts_layer will be applied to both AnnDatas. If it is a list,
                 the first will be applied to adata_1, second applied to adata_2
-            transformed_layer: AnnData layer corresponding to transformed counts.
-                Same premise as raw_layer.
             transformed_obsm: AnnData obsm key corresponding to transformed data.
             sample_batch_id: whether to yield batch indices in each sample.
-            require_raw: Whether the raw counts are required by the model. The raw counts are not needed
+            require_counts: Whether the raw counts are required by the model. The raw counts are not needed
                 if the model is not going to decode anything
             n_epochs: number of epochs to sample before raising StopIteration.
             rng: the random number generator.
@@ -323,20 +309,17 @@ class TriCellSampler():
         Assumption that adata_1 and adata_2 have the same cells in the same order.
         """
         assert adata_1.n_obs == adata_2.n_obs == adata_3.n_obs, "The two AnnData objects have a different number of observations"
-        assert transformed_obsm is None or transformed_layer is None
         self.n_cells: int = adata_1.n_obs
         self.batch_size: int = batch_size
         self.n_epochs: Union[int, float] = n_epochs
-        self.require_raw: bool = require_raw
+        self.require_counts: bool = require_counts
 
-        if isinstance(raw_layer, str) or raw_layer is None:
-            raw_layer = [raw_layer, raw_layer, raw_layer]
-        # if isinstance(transformed_layer, str) or transformed_layer is None:
-        #     transformed_layer = [transformed_layer, transformed_layer]
+        if isinstance(counts_layer, str) or counts_layer is None:
+            counts_layer = [counts_layer, counts_layer, counts_layer]
 
-        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[raw_layer[0]] if raw_layer[0] else adata_1.X
-        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[raw_layer[1]] if raw_layer[1] else adata_2.X
-        self.X_3: Union[np.ndarray, spmatrix] = adata_3.layers[raw_layer[2]] if raw_layer[2] else adata_3.X
+        self.X_1: Union[np.ndarray, spmatrix] = adata_1.layers[counts_layer[0]] if counts_layer[0] else adata_1.X
+        self.X_2: Union[np.ndarray, spmatrix] = adata_2.layers[counts_layer[1]] if counts_layer[1] else adata_2.X
+        self.X_3: Union[np.ndarray, spmatrix] = adata_3.layers[counts_layer[2]] if counts_layer[2] else adata_3.X
 
         self.is_sparse_1: bool = isinstance(self.X_1, spmatrix)
         self.is_sparse_2: bool = isinstance(self.X_2, spmatrix)
@@ -352,13 +335,7 @@ class TriCellSampler():
         self.library_size_2: Union[spmatrix, np.ndarray] = self.X_2.sum(1) if self.is_sparse_2 else self.X_2.sum(1, keepdims=True)
         self.library_size_3: Union[spmatrix, np.ndarray] = self.X_3.sum(1) if self.is_sparse_3 else self.X_3.sum(1, keepdims=True)
 
-        if transformed_layer is not None:
-            if isinstance(transformed_layer, str):
-                transformed_layer = [transformed_layer, transformed_layer, transformed_layer]
-            self.X_1_transformed = adata_1.layers[transformed_layer[0]] if transformed_layer[0] else adata_1.X
-            self.X_2_transformed = adata_2.layers[transformed_layer[1]] if transformed_layer[1] else adata_2.X
-            self.X_3_transformed = adata_3.layers[transformed_layer[2]] if transformed_layer[2] else adata_3.X
-        elif transformed_obsm is not None:
+        if transformed_obsm is not None:
             if isinstance(transformed_obsm, str):
                 transformed_obsm = [transformed_obsm, transformed_obsm, transformed_obsm]
             self.X_1_transformed = adata_1.obsm[transformed_obsm[0]] if transformed_obsm[0] else adata_1.X
@@ -407,7 +384,7 @@ class TriCellSampler():
 
         count = 0
 
-        if not self.require_raw:
+        if not self.require_counts:
             X_1 = torch.zeros([])
             X_2 = torch.zeros([])
         else:
@@ -468,7 +445,7 @@ class TriCellSampler():
             library_size_2 = torch.FloatTensor(self.library_size_2[batch])
             library_size_3 = torch.FloatTensor(self.library_size_3[batch])
 
-            if not self.require_raw:
+            if not self.require_counts:
                 cells_1 = cells_2 = cells_3 = torch.zeros([])
             else:
                 X_1 = self.X_1[batch, :]

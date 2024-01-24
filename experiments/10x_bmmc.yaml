@@ -8,19 +8,19 @@ model_params:
   hidden_dims:
     - 128
   decode_features: True
+  norm: batch
   decode_method: dropout
   modality_discriminative: True
-  batch_discriminative: False
+  batch_discriminative: True
   batch_dispersion: True
   variational: True
   distance_loss: False
   loss_method: clip
-  cap_temperature: 50
 trainer_params:
   n_epochs: 300
-  eval_every: 300
+  eval_every: 600
   ping_every: 100
-  raw_layer:
+  counts_layer:
     - counts
     - binary
   transformed_obsm:
@@ -31,4 +31,5 @@ trainer_params:
   batch_size: 5000
 cell_type_col: cell_type
 reconstruct: True
+pretrained: True
 ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/10x_bmmc/

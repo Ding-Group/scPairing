@@ -5,3 +5,5 @@ notebooks/
 *.pbs
 libraries/
 */__pycache__
+*.sh
+*.out

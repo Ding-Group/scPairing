@@ -1,10 +1,10 @@
 files:
   mod1:
-    - /arc/project/st-jiaruid-1/yinian/teaseq/2_GSM4949911_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/teaseq/teaseq_rna_combined.h5ad
   mod2:
-    - /arc/project/st-jiaruid-1/yinian/teaseq/2_GSM4949911_atac.h5ad
+    - /arc/project/st-jiaruid-1/yinian/teaseq/teaseq_atac_combined.h5ad
   mod3:
-    - /arc/project/st-jiaruid-1/yinian/teaseq/2_GSM4949911_prot.h5ad
+    - /arc/project/st-jiaruid-1/yinian/teaseq/teaseq_prot_combined.h5ad
 model_params:
   emb_dim: 10
   hidden_dims:
@@ -22,10 +22,9 @@ trainer_params:
   ping_every: 50
   highly_variable: True
   decode_highly_variable: True
-  raw_layer:
+  counts_layer:
     - counts
     - binary
-  transformed_layer:
   transformed_obsm:
     - X_scVI
     - X_PeakVI

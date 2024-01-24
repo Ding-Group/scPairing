@@ -12,7 +12,6 @@ import torch.optim as optim
 from torch.distributions import Normal, Independent
 
 from logging_utils import log_arguments
-from .BaseCellModel import BaseCellModel
 from batch_sampler import TriCellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
@@ -600,8 +599,7 @@ class scCLIP(nn.Module):
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
-        raw_layer=None,
-        transformed_layer=None,
+        counts_layer=None,
         transformed_obsm=None,
         inplace: bool = True
     ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
@@ -637,8 +635,7 @@ class scCLIP(nn.Module):
 
         self._apply_to(
             adata_1, adata_2, adata_3, batch_col, batch_size,
-            raw_layer=raw_layer,
-            transformed_layer=transformed_layer,
+            counts_layer=counts_layer,
             transformed_obsm=transformed_obsm,
             hyper_param_dict=hyper_param_dict,
             callback=store_emb_and_nll
@@ -664,8 +661,7 @@ class scCLIP(nn.Module):
         adata_3: anndata.AnnData,
         batch_col: str = 'batch_indices',
         batch_size: int = 2000,
-        raw_layer=None,
-        transformed_layer=None,
+        counts_layer=None,
         transformed_obsm=None,
         hyper_param_dict: Union[dict, None] = None,
         callback: Union[Callable, None] = None
@@ -674,9 +670,8 @@ class scCLIP(nn.Module):
         """
         sampler = TriCellSampler(
             adata_1, adata_2, adata_3,
-            require_raw=self.use_decoder,
-            raw_layer=raw_layer,
-            transformed_layer=transformed_layer,
+            require_counts=self.use_decoder,
+            counts_layer=counts_layer,
             transformed_obsm=transformed_obsm,
             batch_size=batch_size, sample_batch_id=self.need_batch,
             n_epochs=1, batch_col=batch_col, shuffle=False
@@ -688,7 +683,7 @@ class scCLIP(nn.Module):
             if callback is not None:
                 callback(data_dict, fwd_dict)
 
-    def _pred_mod1_mod2_forward(self,
+    def pred_mod1_mod2_forward(self,
         data_dict: Mapping[str, torch.Tensor],
         hyper_param_dict: Mapping[str, Any] = dict()
     ) -> Mapping[str, Any]:
@@ -710,7 +705,7 @@ class scCLIP(nn.Module):
         )
         return fwd_dict
 
-    def _pred_mod2_mod1_forward(self,
+    def pred_mod2_mod1_forward(self,
         data_dict: Mapping[str, torch.Tensor],
         hyper_param_dict: Mapping[str, Any] = dict()
     ) -> Mapping[str, Any]:
@@ -734,7 +729,6 @@ class scCLIP(nn.Module):
 
     def pred_mod1_to_mod2(self,
         adata_1: anndata.AnnData,
-        transformed_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         batch_size: int = 2000,
         batch_col: str = 'batch_indices',
@@ -749,7 +743,6 @@ class scCLIP(nn.Module):
             adata_1,  # We will ignore the second modality
             use_highly_variable=self.encode_hvar,
             decode_highly_variable=self.decode_hvar,
-            transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
             batch_size=batch_size,
             sample_batch_id=self.need_batch,
@@ -763,7 +756,7 @@ class scCLIP(nn.Module):
         features = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self._pred_mod1_mod2_forward(data_dict, hyper_param_dict)
+            fwd_dict = self.pred_mod1_mod2_forward(data_dict, hyper_param_dict)
             embs.append(fwd_dict['mod2_reconstruct'].detach().cpu())
             features.append(fwd_dict['mod1_features'].detach().cpu())
         
@@ -779,7 +772,6 @@ class scCLIP(nn.Module):
 
     def pred_mod2_to_mod1(self,
         adata_2: anndata.AnnData,
-        transformed_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         batch_size: int = 2000,
         batch_col: str = 'batch_indices',
@@ -794,7 +786,6 @@ class scCLIP(nn.Module):
             adata_2,  # We will ignore the second modality
             use_highly_variable=self.encode_hvar,
             decode_highly_variable=self.decode_hvar,
-            transformed_layer=transformed_layer,
             transformed_obsm=transformed_obsm,
             batch_size=batch_size,
             sample_batch_id=self.need_batch,
@@ -808,7 +799,7 @@ class scCLIP(nn.Module):
         features = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self._pred_mod2_mod1_forward(data_dict, hyper_param_dict)
+            fwd_dict = self.pred_mod2_mod1_forward(data_dict, hyper_param_dict)
             embs.append(fwd_dict['mod1_reconstruct'].detach().cpu())
             features.append(fwd_dict['mod2_features'].detach().cpu())
         

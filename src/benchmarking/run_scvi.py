@@ -19,13 +19,34 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import KFold
 
 
-scvi.settings.seed = 4
+scvi.settings.seed = 0
+
+# Running it to get 
+def main(config, output_dir):
+    ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/t2d/cell_cluster/multiome_RNA_raw.h5ad')
+
+    sc.pp.filter_genes(ref, min_cells=5)
+    ref.layers['raw'] = ref.X.copy()
+    sc.pp.normalize_total(ref)
+    sc.pp.log1p(ref)
+    sc.pp.highly_variable_genes(ref, subset=True)
+
+    scvi.model.SCVI.setup_anndata(ref, batch_key='batch')
+    model = scvi.model.SCVI(ref, n_latent=50, gene_likelihood='nb')
+    model.train()
+    model.save(output_dir, overwrite=True, prefix='scvi_hvar_')
+
+    latent = model.get_latent_representation()
+    ref.obsm['X_scVI'] = latent
+
+    with open(os.path.join(output_dir, "hvar_embs.pkl"), 'wb') as f:
+        pickle.dump(latent, f)
 
 
 # def main(config, output_dir):
 #     ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_rna.h5ad')
 
-#     ref = ref[:, ref.var.highly_variable].copy()
+#     # ref = ref[:, ref.var.highly_variable].copy()
 #     ref.X = ref.layers['counts']
 
 #     scvi.model.SCVI.setup_anndata(ref, batch_key='batch')
@@ -56,65 +77,65 @@ scvi.settings.seed = 4
 #                 vals.append(np.sum(pred_y == test_y) / len(test_y))
 #             f.write(f'n={n}, Average={sum(vals) / len(vals)}\n')
 
-#     # Visualization
-#     sc._settings.ScanpyConfig.figdir = Path(output_dir)
-
-#     sc.pp.neighbors(ref, use_rep='X_scVI')
-#     sc.tl.umap(ref, min_dist=0.1)
-#     sc.pl.umap(ref, color=['cell_type', 'batch'], ncols=1, save='vis.png')
-
-
-def main(config, output_dir):
-    ref = ad.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_merged.h5ad')
-    # val = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/validation_bmmc_merged.h5ad')
-
-    # val.obs['batch'] = 'unknown'
-    # val.obs['cell_type'] = 'unknown'
-
-    # mod2_adata = ad.concat([ref, val], merge='first')
-    mod2_adata = ref
-    # mod2_adata.X = mod2_adata.layers['counts']
-    mod2_adata.obs.batch = mod2_adata.obs.batch.cat.add_categories(['val'])
-
-    # min_cells = int(mod2_adata.shape[0] * 0.01)
-    # sc.pp.filter_genes(mod2_adata, min_cells=min_cells)
-
-    scvi.model.PEAKVI.setup_anndata(mod2_adata, batch_key='batch')
-    pvi = scvi.model.PEAKVI(mod2_adata, n_latent=50)
-    pvi.train()
-
-    pvi.save(output_dir, overwrite=True, prefix='pvi_merged_2_')
-
-    latent = pvi.get_latent_representation()
-    mod2_adata.obsm['X_PeakVI'] = latent
-
-    with open(os.path.join(output_dir, "pvi_merged_2_embs.pkl"), 'wb') as f:
-        pickle.dump(latent, f)
-    
-    # kNN
-    # X = mod2_adata.obsm['X_PeakVI']
-    # y = mod2_adata.obs[config['cell_type_col']]
-
-    # kf = KFold(n_splits=10)
-    # with open(os.path.join(output_dir, "knn.txt"), 'w') as f:
-    #     for n in [5, 17, 29, 41, 53, 65]:
-    #         vals = []
-    #         for i, (train_index, test_index) in enumerate(kf.split(X)):
-    #             train_X, train_y = X[train_index], y[train_index]
-    #             test_X, test_y = X[test_index], y[test_index]
-    #             neigh = KNeighborsClassifier(n_neighbors=n)
-    #             neigh.fit(train_X, train_y)
-
-    #             pred_y = neigh.predict(test_X)
-    #             vals.append(np.sum(pred_y == test_y) / len(test_y))
-    #         f.write(f'n={n}, Average={sum(vals) / len(vals)}\n')
-    
-    # Visualization
+    # # Visualization
     # sc._settings.ScanpyConfig.figdir = Path(output_dir)
 
-    # sc.pp.neighbors(mod2_adata, use_rep='X_PeakVI')
-    # sc.tl.umap(mod2_adata, min_dist=0.1)
-    # sc.pl.umap(mod2_adata, color=['cell_type', 'batch'], save='vis.png')
+    # sc.pp.neighbors(ref, use_rep='X_scVI')
+    # sc.tl.umap(ref, min_dist=0.1)
+    # sc.pl.umap(ref, color=['cell_type', 'batch'], ncols=1, save='vis.png')
+
+
+# def main(config, output_dir):
+#     ref = ad.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_merged.h5ad')
+#     # val = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/validation_bmmc_merged.h5ad')
+
+#     # val.obs['batch'] = 'unknown'
+#     # val.obs['cell_type'] = 'unknown'
+
+#     # mod2_adata = ad.concat([ref, val], merge='first')
+#     mod2_adata = ref
+#     # mod2_adata.X = mod2_adata.layers['counts']
+#     mod2_adata.obs.batch = mod2_adata.obs.batch.cat.add_categories(['val'])
+
+#     # min_cells = int(mod2_adata.shape[0] * 0.01)
+#     # sc.pp.filter_genes(mod2_adata, min_cells=min_cells)
+
+#     scvi.model.PEAKVI.setup_anndata(mod2_adata, batch_key='batch')
+#     pvi = scvi.model.PEAKVI(mod2_adata, n_latent=50)
+#     pvi.train()
+
+#     pvi.save(output_dir, overwrite=True, prefix='pvi_merged_2_')
+
+#     latent = pvi.get_latent_representation()
+#     mod2_adata.obsm['X_PeakVI'] = latent
+
+#     with open(os.path.join(output_dir, "pvi_merged_2_embs.pkl"), 'wb') as f:
+#         pickle.dump(latent, f)
+    
+#     # kNN
+#     # X = mod2_adata.obsm['X_PeakVI']
+#     # y = mod2_adata.obs[config['cell_type_col']]
+
+#     # kf = KFold(n_splits=10)
+#     # with open(os.path.join(output_dir, "knn.txt"), 'w') as f:
+#     #     for n in [5, 17, 29, 41, 53, 65]:
+#     #         vals = []
+#     #         for i, (train_index, test_index) in enumerate(kf.split(X)):
+#     #             train_X, train_y = X[train_index], y[train_index]
+#     #             test_X, test_y = X[test_index], y[test_index]
+#     #             neigh = KNeighborsClassifier(n_neighbors=n)
+#     #             neigh.fit(train_X, train_y)
+
+#     #             pred_y = neigh.predict(test_X)
+#     #             vals.append(np.sum(pred_y == test_y) / len(test_y))
+#     #         f.write(f'n={n}, Average={sum(vals) / len(vals)}\n')
+    
+#     # Visualization
+#     # sc._settings.ScanpyConfig.figdir = Path(output_dir)
+
+#     # sc.pp.neighbors(mod2_adata, use_rep='X_PeakVI')
+#     # sc.tl.umap(mod2_adata, min_dist=0.1)
+#     # sc.pl.umap(mod2_adata, color=['cell_type', 'batch'], save='vis.png')
 
 
 if __name__ == '__main__':

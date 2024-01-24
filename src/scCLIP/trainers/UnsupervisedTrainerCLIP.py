@@ -14,7 +14,7 @@ from torch import optim
 
 from batch_sampler import CellSampler, TriCellSampler
 from eval_utils import evaluate
-from models import BaseCellModel
+from models import model
 from logging_utils import initialize_logger, log_arguments
 from .trainer_utils import train_test_split, train_test_split_cite, set_seed, _stats_recorder
 
@@ -51,9 +51,7 @@ class UnsupervisedTrainer:
         train_adata_mod1: the training data. Contains (1 - test_ratio) x 100% of
             adata_1.
         test_adata_mod2: the test data. Contains test_ratio x 100% of adata_2.
-        raw_layer: layer in AnnData corresponding to raw counts. If None, use .X
-        transformed_layer: layer in AnnData corresponding to transformed counts.
-            If None, use .X
+        counts_layer: layer in AnnData corresponding to raw counts. If None, use .X
     """
 
     attr_fname: Mapping[str, str] = dict(
@@ -63,12 +61,11 @@ class UnsupervisedTrainer:
 
     @log_arguments
     def __init__(self,
-        model: BaseCellModel,
+        model: model.scCLIP,
         adata_1: anndata.AnnData,
         adata_2: anndata.AnnData,
         adata_3: Optional[anndata.AnnData] = None,
-        raw_layer: Optional[Union[str, List[str]]] = None,
-        transformed_layer: Optional[Union[str, List[str]]] = None,
+        counts_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         ckpt_dir: Union[str, None] = None,
         test_ratio: float = 0.,
@@ -88,8 +85,7 @@ class UnsupervisedTrainer:
             adata_1: the intact single-cell dataset (first modality).
             adata_2: the intact single-cell dataset (second modality).
             adata_3: the intact single-cell dataset (third modality), if there is one.
-            raw_layer: layer corresponding to raw counts.
-            transformed_layer: layer corresponding to transformed counts.
+            counts_layer: layer corresponding to raw counts.
             transformed_obsm: key in obsm corresponding to transformed data.
             ckpt_dir: directory to store the logs, the checkpoints and the
                 plots. If training from scratch (restore_epoch = 0), this would
@@ -110,7 +106,7 @@ class UnsupervisedTrainer:
         if seed >= 0:
             set_seed(seed)
 
-        self.model: BaseCellModel = model
+        self.model: model.scCLIP = model
 
         self.train_adata_1 = self.test_adata_1 = self.adata_1 = adata_1
         self.train_adata_2 = self.test_adata_2 = self.adata_2 = adata_2
@@ -119,11 +115,8 @@ class UnsupervisedTrainer:
             self.train_adata_1, self.test_adata_1, self.train_adata_2, self.test_adata_2 = \
                 train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
         
-        self.raw_layer = raw_layer
+        self.counts_layer = counts_layer
 
-        if transformed_layer is not None and transformed_obsm is not None:
-            raise ValueError("Only one of transformed_layer and transformed_obsm should be given")
-        self.transformed_layer = transformed_layer
         self.transformed_obsm = transformed_obsm
 
         no_decay = list()
@@ -299,9 +292,8 @@ class UnsupervisedTrainer:
                 self.train_adata_1,
                 self.train_adata_2,
                 self.batch_size,
-                require_raw=need_reconstruction,
-                raw_layer=self.raw_layer,
-                transformed_layer=self.transformed_layer,
+                require_counts=need_reconstruction,
+                counts_layer=self.counts_layer,
                 transformed_obsm=self.transformed_obsm,
                 sample_batch_id=self.model.need_batch,
                 n_epochs=n_epochs - self.epoch,
@@ -313,9 +305,8 @@ class UnsupervisedTrainer:
                 self.train_adata_2,
                 self.train_adata_3,
                 self.batch_size,
-                require_raw=need_reconstruction,
-                raw_layer=self.raw_layer,
-                transformed_layer=self.transformed_layer,
+                require_counts=need_reconstruction,
+                counts_layer=self.counts_layer,
                 transformed_obsm=self.transformed_obsm,
                 sample_batch_id=self.model.need_batch,
                 n_epochs=n_epochs - self.epoch,
@@ -324,16 +315,16 @@ class UnsupervisedTrainer:
         dataloader = iter(sampler)
         
         # set up the stats recorder
-        if os.path.exists(os.path.join(self.ckpt_dir, 'stats.csv')):
-            log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
-        else:
-            log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
+        # if os.path.exists(os.path.join(self.ckpt_dir, 'stats.csv')):
+        #     log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
+        # else:
+        #     log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
         recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
         next_ping_epoch = min(int(np.ceil(self.epoch / ping_every) * ping_every), n_epochs)
 
-        with open(os.path.join(self.ckpt_dir, 'device.txt'), 'w') as f:
-            f.write(str(self.model.device))
+        # with open(os.path.join(self.ckpt_dir, 'device.txt'), 'w') as f:
+        #     f.write(str(self.model.device))
 
         while self.epoch < n_epochs:
             # Train one epoch
@@ -344,9 +335,9 @@ class UnsupervisedTrainer:
                 max_kl_weight=max_kl_weight,
                 **train_kwargs
             )
-            if self.epoch == 0:
-                log_file.write(','.join(['epoch'] + list(new_record.keys())) + '\n')
-            log_file.write(','.join(map(str, [self.epoch] + list(new_record.values()))) + '\n')
+            # if self.epoch == 0:
+                # log_file.write(','.join(['epoch'] + list(new_record.keys())) + '\n')
+            # log_file.write(','.join(map(str, [self.epoch] + list(new_record.values()))) + '\n')
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
 
@@ -379,11 +370,11 @@ class UnsupervisedTrainer:
                 next_ckpt_epoch = min(eval_every + next_ckpt_epoch, n_epochs)
 
             if self.epoch >= next_ping_epoch:
-                with open(os.path.join(self.ckpt_dir, 'ping.txt'), 'w') as f:
-                    f.write(str(self.epoch))
+                # with open(os.path.join(self.ckpt_dir, 'ping.txt'), 'w') as f:
+                #     f.write(str(self.epoch))
                 next_ping_epoch = ping_every + next_ping_epoch
 
-        log_file.close()
+        # log_file.close()
         del recorder
         _logger.info("Optimization Finished: %s" % self.ckpt_dir)
 
