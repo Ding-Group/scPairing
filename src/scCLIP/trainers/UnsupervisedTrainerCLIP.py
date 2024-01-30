@@ -75,7 +75,6 @@ class UnsupervisedTrainer:
         weight_decay: float = 0.,
         batch_size: int = 2000,
         train_instance_name: str = "scCLIP",
-        restore_epoch: int = 0,
         seed: int = -1,
     ) -> None:
         """Initializes the UnsupervisedTrainer object.
@@ -146,10 +145,10 @@ class UnsupervisedTrainer:
         self.seed = seed
 
         self.train_instance_name = train_instance_name
-        if restore_epoch > 0 and type(self) == UnsupervisedTrainer:
-            self.ckpt_dir = ckpt_dir
-            self.load_ckpt(restore_epoch, self.ckpt_dir)
-        elif ckpt_dir is not None and restore_epoch == 0:
+        # if restore_epoch > 0 and type(self) == UnsupervisedTrainer:
+        #     self.ckpt_dir = ckpt_dir
+        #     self.load_ckpt(restore_epoch, self.ckpt_dir)
+        if ckpt_dir is not None:
             self.ckpt_dir = os.path.join(ckpt_dir, f"{self.train_instance_name}_{time.strftime('%m_%d-%H_%M_%S')}")
             os.makedirs(self.ckpt_dir, exist_ok=True)
             initialize_logger(self.ckpt_dir)
@@ -157,29 +156,29 @@ class UnsupervisedTrainer:
         else:
             self.ckpt_dir = None
 
-    @log_arguments
-    def load_ckpt(self, restore_epoch: int, ckpt_dir: Union[str, None] = None) -> None:
-        """Loads model checkpoints.
+    # @log_arguments
+    # def load_ckpt(self, restore_epoch: int, ckpt_dir: Union[str, None] = None) -> None:
+    #     """Loads model checkpoints.
 
-        After loading, self.step, self.epoch and self.lr are set to
-        the corresponding values, and the loger will be re-initialized.
+    #     After loading, self.step, self.epoch and self.lr are set to
+    #     the corresponding values, and the loger will be re-initialized.
 
-        Args:
-            restore_epoch: the epoch to restore.
-            ckpt_dir: the directory containing the model checkpoints. If None,
-                set to self.ckpt_dir.
-        """
+    #     Args:
+    #         restore_epoch: the epoch to restore.
+    #         ckpt_dir: the directory containing the model checkpoints. If None,
+    #             set to self.ckpt_dir.
+    #     """
 
-        if ckpt_dir is None:
-            ckpt_dir = self.ckpt_dir
-        assert ckpt_dir is not None and os.path.exists(ckpt_dir), f"ckpt_dir {ckpt_dir} does not exist."
-        for attr, fname in self.attr_fname.items():
-            fpath = os.path.join(ckpt_dir, f'{fname}-{restore_epoch}')
-            getattr(self, attr).load_state_dict(torch.load(fpath))
-        _logger.info(f'Parameters and optimizers restored from {ckpt_dir}.')
-        initialize_logger(self.ckpt_dir)
-        _logger.info(f'ckpt_dir: {self.ckpt_dir}')
-        self.update_step(restore_epoch * self.steps_per_epoch)
+    #     if ckpt_dir is None:
+    #         ckpt_dir = self.ckpt_dir
+    #     assert ckpt_dir is not None and os.path.exists(ckpt_dir), f"ckpt_dir {ckpt_dir} does not exist."
+    #     for attr, fname in self.attr_fname.items():
+    #         fpath = os.path.join(ckpt_dir, f'{fname}-{restore_epoch}')
+    #         getattr(self, attr).load_state_dict(torch.load(fpath))
+    #     _logger.info(f'Parameters and optimizers restored from {ckpt_dir}.')
+    #     initialize_logger(self.ckpt_dir)
+    #     _logger.info(f'ckpt_dir: {self.ckpt_dir}')
+    #     self.update_step(restore_epoch * self.steps_per_epoch)
 
     @staticmethod
     def _calc_weight(
@@ -238,12 +237,12 @@ class UnsupervisedTrainer:
 
     @log_arguments
     def train(self,
-        n_epochs: int = 800,
-        eval_every: int = 200,
+        n_epochs: int = 300,
+        eval_every: int = 300,
         need_reconstruction: bool = True,
         kl_warmup_ratio: float = 0.,
         min_kl_weight: float = 0.,
-        max_kl_weight: float = 1e-5,
+        max_kl_weight: float = 1e-3,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
         ping_every: Optional[int] = None,
@@ -256,8 +255,6 @@ class UnsupervisedTrainer:
         Args:
             n_epochs: the total number of epochs to train the model.
             eval_every: evaluate the model every this many epochs.
-            n_samplers: #samplers (#threads) to use to sample training
-                minibatches.
             kl_warmup_ratio: ratio of KL warmup epochs and n_epochs.
             min_kl_weight: minimum weight of the KL term.
             max_kl_weight: maximum weight of the KL term.
@@ -286,7 +283,6 @@ class UnsupervisedTrainer:
             ping_every = n_epochs
         
         # set up sampler and dataloader
-        # if n_samplers == 1 or self.batch_size >= self.train_adata_1.n_obs:
         if self.adata_3 is None:
             sampler = CellSampler(
                 self.train_adata_1,

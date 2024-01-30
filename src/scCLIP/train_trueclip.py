@@ -57,7 +57,7 @@ def main(config, seed=0):
         encoder_hidden_dims=model_params['hidden_dims'],
         decoder_hidden_dims=model_params['hidden_dims'],
         variational=model_params.get('variational', False),
-        use_decoder=model_params['decode_features'],
+        use_decoder=model_params['use_decoder'],
         combine_method=model_params.get('decode_method', 'dropout'),
         modality_discriminative=model_params.get('modality_discriminative', False),
         batch_discriminative=model_params.get('batch_discriminative', False),
@@ -90,7 +90,7 @@ def main(config, seed=0):
         n_epochs=trainer_params['n_epochs'],
         eval_every=trainer_params['eval_every'],
         batch_col=batch_col,
-        need_reconstruction=model_params['decode_features'],
+        need_reconstruction=model_params['use_decoder'],
         ping_every=trainer_params.get('ping_every', None),
         eval_kwargs=dict(cell_type_col=config['cell_type_col']),
         n_samplers=1,
@@ -99,7 +99,7 @@ def main(config, seed=0):
     )
 
     emb_names = ['mod1_features', 'mod2_features']
-    if model_params.get('decode_features', False) and config.get('reconstruct', False):
+    if model_params.get('use_decoder', False) and config.get('reconstruct', False):
         emb_names += ['mod1_reconstruct']
     nll = model.get_cell_embeddings_and_nll(
         mod1_adata, mod2_adata, emb_names=emb_names,

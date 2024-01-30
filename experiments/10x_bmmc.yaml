@@ -7,10 +7,10 @@ model_params:
   emb_dim: 10
   hidden_dims:
     - 128
-  decode_features: True
+  use_decoder: True
   norm: batch
   decode_method: dropout
-  modality_discriminative: True
+  modality_discriminative: False
   batch_discriminative: True
   batch_dispersion: True
   variational: True

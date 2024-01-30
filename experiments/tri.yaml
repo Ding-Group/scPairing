@@ -9,7 +9,7 @@ model_params:
   emb_dim: 10
   hidden_dims:
     - 128
-  decode_features: True
+  use_decoder: True
   decode_method: dropout
   modality_discriminative: True
   variational: True

@@ -7,13 +7,13 @@ model_params:
   emb_dim: 10
   hidden_dims:
     - 128
-  decode_features: True
+  use_decoder: True
   decode_method: dropout
   decode_hvar: True
   modality_discriminative: False
   loss_method: clip
 trainer_params:
-  n_epochs: 600
+  n_epochs: 100
   eval_every: 300
   ping_every: 100
   highly_variable: True

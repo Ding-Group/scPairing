@@ -67,7 +67,72 @@ def get_fully_connected_layers(
 
 
 class scCLIP(nn.Module):
-    """
+    """Variational autoencoder model
+
+    Parameters
+    ----------
+    mod1_input_dim
+        Input dimension of the low-dimensional representations for the first data modality.
+    mod2_input_dim
+        Input dimension of the low-dimensional representations for the second data modality.
+    mod1_var_dim
+        Dimension of the count features for the first data modality.
+    mod2_var_dim
+        Dimension of the count features for the second data modality.
+    n_batches
+        Number of batches present in the dataset
+    mod1_type
+        The modality type of adata1. One of the following:
+
+        * ``'rna'`` - for scRNA-seq data modeled with a negative binomial distribution
+        * ``'atac'`` - for scATAC-seq data modeled with a Bernoulli distribution
+        * ``'protein'`` for epitope data modeled with a negative binomial distribution
+        * ``'other'`` for other data modalities modeled with a Gaussian distribution
+    mod2_type
+        The modality type of adata2. The options are identical to mod1_type.
+    use_decoder
+        Whether to train a decoder to reconstruct the counts on top of the low-dimension representations.
+    emb_dim
+        Dimension of the hyperspherical latent space
+    encoder_hidden_dims
+        Number of nodes and depth of the encoder
+    decoder_hidden_dims
+        Number of nodes and depth of the decoder
+    reconstruct_mod1_fn
+        Custom function that reconstructs the counts from the reconstructed low-dimension representations
+        for the first data modality.
+    reconstruct_mod2_fn
+        Custom function that reconstructs the counts from the reconstructed low-dimension representations
+        for the second modality.
+    loss_method
+        The type of contrastive loss to use. One of the following:
+
+        * ``'clip'`` - contrastive loss from `Learning Transferable Visual Models From Natural Language Supervision` (Radford `et al.`, 2021)
+        * ``'debiased_clip'`` - debiased contrastive loss from `Debiased Contrastive Learning` (Chuang `et al.`, 2020)
+        * ``'batch_clip'`` - contrastive loss except applied on only cells of the same batch
+        * ``'sigmoid'`` - sigmoid loss from `Sigmoid Loss for Language Image Pre-Training` (Zhai `et al.`, 2023)
+    variational
+        Whether the model should be a VAE or AE.
+    combine_method
+        Method for merging representations from the two encoders. One of the following:
+
+        * ``'dropout'`` - Random dropout of one representation and replace the zeros with the values
+          from the second representation, from `Cross-modal autoencoder framework learns holistic representations
+          of cardiovascular state` (Radhakrishnan `et al.`, 2023).
+        * ``'average'`` - Average between the two representations
+    batch_dispersion
+        Whether dispersion for negative binomial likelihood models is separate for different batches
+    use_norm
+        Type of normalization to apply. One of:
+
+        * ``'layer'`` - layer normalization
+        * ``'batch'`` - batch normalization
+        * ``'none'`` - no normalization
+    dropout
+        Dropout proportion
+    
+    seed
+        Random seed for model reproducibility.
 
     """
     emb_names: Sequence[str] = ['mod1_features', 'mod2_features']
@@ -93,10 +158,10 @@ class scCLIP(nn.Module):
         batch_dispersion: bool = False,
         use_norm: Literal['layer', 'batch', 'none'] = 'batch',
         dropout: float = 0.1,
-        modality_discriminative: bool = False,
+        modality_discriminative: bool = True,
         batch_discriminative: bool = False,
         batch_discriminative_weight: float = 1,
-        distance_loss: bool = False,
+        distance_loss: bool = True,
         downsample_clip: bool = False,
         downsample_clip_prob: float = 0.5,
         tau: float = 0.1,
@@ -106,11 +171,6 @@ class scCLIP(nn.Module):
         seed=None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
-        """
-        Initializes a CLIP with n_mod1 features for the first modality, and n_mod2
-        features for the second modality in the dataset.
-        The CLIP model will embed onto a hypersphere of dimension <emb_dim>.
-        """
         super().__init__()
 
         # Validation and warnings
@@ -274,21 +334,7 @@ class scCLIP(nn.Module):
                 norm_type=self.norm,
                 dropout_prob=self.dropout
             )
-        
-        # self.mod1_decoder: nn.Module = get_fully_connected_layers(
-        #     mod1_decoder_input_dim,
-        #     self.n_mod1_output,
-        #     hidden_dims=self.decoder_hidden_dims,
-        #     norm_type=self.norm,
-        #     dropout_prob=self.dropout
-        # )
-        # self.mod2_decoder: nn.Module = get_fully_connected_layers(
-        #     mod2_decoder_input_dim,
-        #     self.n_mod2_output,
-        #     hidden_dims=self.decoder_hidden_dims,
-        #     norm_type=self.norm,
-        #     dropout_prob=self.dropout
-        # )
+
         if self.reconstruct_mod1_fn is None and (self.mod1_type == 'rna' or self.mod1_type == 'protein'):
             if self.batch_dispersion:
                 self.mod1_dispersion: nn.Parameter = nn.Parameter(torch.rand(self.n_batches, self.n_mod1_output))
@@ -328,15 +374,26 @@ class scCLIP(nn.Module):
                     batch_one_hot = torch.zeros(features.shape[0], self.n_batches)
                 approx_mod1_features = torch.cat([approx_mod1_features, batch_one_hot], axis=1)
             approx_mod1_features = self.mod1_reconstructor(approx_mod1_features)
-            if is_imputation:
-                library_size = torch.ones([])
-            mod1_reconstruct = F.softmax(approx_mod1_features, dim=1) * library_size
-            dispersion = self.mod1_dispersion[batch_indices] if self.batch_dispersion else self.mod1_dispersion
-            reconstruction_loss = -log_nb_positive(
-                counts,
-                mod1_reconstruct,
-                dispersion.exp()
-            ).mean() / self.n_mod1_output if not is_imputation else torch.zeros([])
+            if self.mod1_type == 'rna':
+                if is_imputation:
+                    library_size = torch.ones([])
+                mod1_reconstruct = F.softmax(approx_mod1_features, dim=1) * library_size
+                dispersion = self.mod1_dispersion[batch_indices] if self.batch_dispersion else self.mod1_dispersion
+                reconstruction_loss = -log_nb_positive(
+                    counts,
+                    mod1_reconstruct,
+                    dispersion.exp()
+                ).mean() / self.n_mod1_output if not is_imputation else torch.zeros([])
+            elif self.mod1_type == 'atac':
+                mod1_reconstruct = torch.sigmoid(approx_mod1_features)
+                reconstruction_loss = F.binary_cross_entropy(
+                    mod1_reconstruct,
+                    counts,
+                    reduction="none"
+                ).sum(-1).mean() * 10 / self.n_mod1_output if not is_imputation else torch.zeros([])
+            elif self.mod1_type == 'other':
+                mod1_reconstruct = approx_mod1_features
+                reconstruction_loss = torch.nn.MSELoss()(counts, mod1_reconstruct).mean() / self.n_mod1_output if not is_imputation else torch.zeros([])
             loss += reconstruction_loss
         else:
             mod1_reconstruct, _ = self.reconstruct_mod1_fn(
@@ -384,23 +441,23 @@ class scCLIP(nn.Module):
                     batch_one_hot = torch.zeros(features.shape[0], self.n_batches)
                 approx_mod2_features = torch.cat([approx_mod2_features, batch_one_hot], axis=1)
             approx_mod2_features = self.mod2_reconstructor(approx_mod2_features)
-            if self.mod2_type == 'atac':
-                mod2_reconstruct = torch.sigmoid(approx_mod2_features)
-                reconstruction_loss = F.binary_cross_entropy(
-                    mod2_reconstruct,
-                    counts,
-                    reduction="none"
-                ).sum(-1).mean() * 10 / self.n_mod2_output if not is_imputation else torch.zeros([])
-            elif self.mod2_type == 'protein':
+            if self.mod2_type == 'rna' or self.mod2_type == 'protein':
                 if is_imputation:
                     library_size = torch.ones([])
-                mod2_reconstruct = F.softmax(approx_mod2_features) * library_size
+                mod2_reconstruct = F.softmax(approx_mod2_features, dim=1) * library_size
                 dispersion = self.mod2_dispersion[batch_indices] if self.batch_dispersion else self.mod2_dispersion
                 reconstruction_loss = -log_nb_positive(
                     counts,
                     mod2_reconstruct,
                     dispersion.exp()
                 ).mean() / self.n_mod2_output if not is_imputation else torch.zeros([])
+            elif self.mod2_type == 'atac':
+                mod2_reconstruct = torch.sigmoid(approx_mod2_features)
+                reconstruction_loss = F.binary_cross_entropy(
+                    mod2_reconstruct,
+                    counts,
+                    reduction="none"
+                ).sum(-1).mean() * 10 / self.n_mod2_output if not is_imputation else torch.zeros([])
             elif self.mod2_type == 'other':
                 mod2_reconstruct = approx_mod2_features
                 reconstruction_loss = torch.nn.MSELoss()(counts, mod2_reconstruct).mean() / self.n_mod2_output if not is_imputation else torch.zeros([])

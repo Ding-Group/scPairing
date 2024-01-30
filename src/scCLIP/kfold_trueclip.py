@@ -151,7 +151,7 @@ def main(config, seed=0):
             encoder_hidden_dims=model_params['hidden_dims'],
             decoder_hidden_dims=model_params['hidden_dims'],
             variational=model_params.get('variational', False),
-            use_decoder=model_params['decode_features'],
+            use_decoder=model_params['use_decoder'],
             use_norm=model_params.get('norm', 'batch'),
             combine_method=model_params.get('decode_method', 'dropout'),
             modality_discriminative=model_params.get('modality_discriminative', False),
@@ -196,7 +196,7 @@ def main(config, seed=0):
         )
 
         emb_names = ['mod1_features', 'mod2_features']
-        if model_params.get('decode_features', False) and config.get('reconstruct', False):
+        if model_params.get('use_decoder', False) and config.get('reconstruct', False):
             emb_names += ['mod1_reconstruct']
         nll = model.get_cell_embeddings_and_nll(
             mod1_train, mod2_train, emb_names=emb_names,
