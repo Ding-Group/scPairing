@@ -27,8 +27,10 @@ _logger = logging.getLogger(__name__)
 def set_seed(seed: int) -> None:
     """Sets the random seed to seed.
 
-    Args:
-        seed: the random seed.
+    Parameters
+    ----------
+    seed
+        The random seed.
     """
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
@@ -44,10 +46,7 @@ def get_fully_connected_layers(
     norm_type: Literal['layer', 'batch', 'none'] = 'layer',
     dropout_prob: float = 0
 ) -> nn.Sequential:
-    """
-    Construct fully connected layers.
-    
-    Modified from scETM (https://github.com/hui2000ji/scETM)
+    """Construct fully connected layers.
     """
     layers = []
     for i, size in enumerate(hidden_dims):
@@ -133,7 +132,6 @@ class scCLIP(nn.Module):
     
     seed
         Random seed for model reproducibility.
-
     """
     emb_names: Sequence[str] = ['mod1_features', 'mod2_features']
 
@@ -299,8 +297,7 @@ class scCLIP(nn.Module):
         self.to(device)
 
     def _init_decoders(self):
-        """
-        Initialize the decoder from CLIP embedding to each model's dimension
+        """Initialize the decoders
         """
         self.mod1_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
@@ -353,11 +350,28 @@ class scCLIP(nn.Module):
         counts: torch.Tensor,
         library_size: torch.Tensor,
         cell_indices: torch.Tensor,
-        batch_indices = None,
+        batch_indices: Optional[torch.Tensor] = None,
         is_imputation: bool = False,
     ) -> Mapping[str, Any]:
-        """
-        Decode first modality data from the combined features
+        """Decode first modality data from the combined features.
+
+        Parameters
+        ----------
+        features
+            Embeddings on the common hyperspherical latent space.
+        mod1_embs
+            Low-dimension representation of the first data modality.
+        counts
+            Raw counts of the first data modality.
+        library_size
+            Library size of the first data modality.
+        cell_indices
+            Indices corresponding to the cells in the minibatch.
+        batch_indices
+            Tensor of integer batch labels.
+        is_imputation
+            Whether the model is decoding cells with known low-dimension representations
+            and raw counts, or is imputing unseen data.
         """
         approx_mod1_features = self.mod1_decoder(features)
         loss = torch.nn.MSELoss()(approx_mod1_features, mod1_embs) if not is_imputation else torch.zeros([])
@@ -423,8 +437,25 @@ class scCLIP(nn.Module):
         batch_indices: Optional[torch.Tensor] = None,
         is_imputation: bool = False,
     ) -> Mapping[str, Any]:
-        """
-        Decode the second modality data from the combined features
+        """Decode second modality data from the combined features.
+
+        Parameters
+        ----------
+        features
+            Embeddings on the common hyperspherical latent space.
+        mod2_embs
+            Low-dimension representation of the second data modality.
+        counts
+            Raw counts of the second data modality.
+        library_size
+            Library size of the second data modality.
+        cell_indices
+            Indices corresponding to the cells in the minibatch.
+        batch_indices
+            Tensor of integer batch labels.
+        is_imputation
+            Whether the model is decoding cells with known low-dimension representations
+            and raw counts, or is imputing unseen data.
         """
         approx_mod2_features = self.mod2_decoder(features)
         loss = torch.nn.MSELoss()(approx_mod2_features, mod2_embs) if not is_imputation else torch.zeros([])
@@ -485,8 +516,16 @@ class scCLIP(nn.Module):
         mod1_features: torch.Tensor,
         mod2_features: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Combines the features using the combine_method of this model
+        """Combines the features using the ``combine_method`` of this model.
+
+        Parameters
+        ----------
+        mod1_features
+            Embeddings on the common hyperspherical latent space from the
+            first modality encoded by the ``mod1_encoder``.
+        mod2_features
+            Embeddings on the common hyperspherical latent space from the
+            second modality encoded by the ``mod2_encoder``.
         """
         if self.combine_method == 'average':
             return (mod1_features + mod2_features) / 2
@@ -502,8 +541,14 @@ class scCLIP(nn.Module):
         data_dict: Mapping[str, torch.Tensor],
         hyper_param_dict: Mapping[str, Any] = dict()
     ) -> Mapping[str, Any]:
-        """
-        Compute the forward pass
+        """Compute the forward pass.
+
+        Parameters
+        ----------
+        data_dict
+            Dictionary containing the minibatch training data.
+        hyper_param_dict
+            Dictionary containing hyperparameters.
         """
         counts_1, counts_2 = data_dict["cells_1"], data_dict["cells_2"]
         library_size_1, library_size_2 = data_dict["library_size_1"], data_dict["library_size_2"]
@@ -639,9 +684,13 @@ class scCLIP(nn.Module):
         record = {k: v.detach().item() for k, v in record.items()}
         return loss, fwd_dict, record
 
-    def discriminative_forward(self, data_dict, hyper_param_dict):
-        """
-        Only get the discriminative loss
+    def discriminative_forward(self, data_dict):
+        """Compute the discriminative loss
+
+        Parameters
+        ----------
+        data_dict
+            Dictionary containing the minibatch training data.
         """
         if not self.modality_discriminative and not self.batch_discriminative:
             return None
@@ -686,18 +735,16 @@ class scCLIP(nn.Module):
         Set the model to train mode, run the forward pass, back propagate the
         gradients, step the optimizer, return the record for this step.
 
-        Args:
-            optimizer: optimizer of the model parameters.
-            data_dict: a dict containing the current minibatch for training.
-            hyper_param_dict: a dict containing hyperparameters for the current
-                batch.
-            loss_update_callback: a callable that updates the loss and the
-                record dict.
-        
-        Returns:
-            A dict storing the record for this training step, which typically
-            includes decomposed loss terms, gradient norm, and other values we
-            care about.
+        Parameters
+        ----------
+        optimizer
+            Optimizer of the model parameters.
+        data_dict
+            Dictionary containing the minibatch training data.
+        hyper_param_dict
+            Dictionary containing hyperparameters.
+        loss_update_callback
+            Callable that updates the loss and the record dict.
         """
         self.train()
         optimizers[0].zero_grad()
@@ -711,15 +758,15 @@ class scCLIP(nn.Module):
 
         if optimizers[1] is not None:
             optimizers[1].zero_grad()
-            loss = self.discriminative_forward(data_dict, hyper_param_dict)
+            loss = self.discriminative_forward(data_dict)
             loss.backward()
             optimizers[1].step()
         return new_record
 
     def get_cell_embeddings_and_nll(
         self,
-        adata_1: anndata.AnnData,
-        adata_2: anndata.AnnData,
+        adata1: anndata.AnnData,
+        adata2: anndata.AnnData,
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
@@ -727,18 +774,12 @@ class scCLIP(nn.Module):
         transformed_obsm=None,
         inplace: bool = True
     ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
-        """
-        Calculates cell embeddings
+        """Calculates cell embeddings and negative log-likelihood
+
+        Parameters
+        ----------
         """
         nlls = []
-        # if self.need_batch and adata_1.obs[batch_col].nunique() != self.n_batches:
-            # _logger.warning(
-            #     f'adata.obs[{batch_col}] contains {adata_1.obs[batch_col].nunique()} batches, '
-            #     f'while self.n_batches == {self.n_batches}.'
-            # )
-            # if self.need_batch:
-            #     _logger.warning('Disable decoding. You will not get reconstructed cell-gene matrix or nll.')
-            #     nlls = None
         if not self.use_decoder:
             nlls = None
         if emb_names is None:
@@ -757,7 +798,7 @@ class scCLIP(nn.Module):
                 nlls.append(fwd_dict['nll'].detach().item())
 
         self._apply_to(
-            adata_1, adata_2, batch_col, batch_size,
+            adata1, adata2, batch_col, batch_size,
             counts_layer=counts_layer,
             transformed_obsm=transformed_obsm,
             hyper_param_dict=hyper_param_dict,
@@ -766,20 +807,20 @@ class scCLIP(nn.Module):
 
         embs = {name: torch.cat(embs[name], dim=0).numpy() for name in emb_names}
         if nlls is not None:
-            nll = sum(nlls) / adata_1.n_obs
+            nll = sum(nlls) / adata1.n_obs
         else:
             nll = None
 
         if inplace:
-            adata_1.obsm.update(embs)
-            adata_2.obsm.update(embs)
+            adata1.obsm.update(embs)
+            adata2.obsm.update(embs)
             return nll
         else:
             return embs, nll
 
     def _apply_to(self,
-        adata_1: anndata.AnnData,
-        adata_2: anndata.AnnData,
+        adata1: anndata.AnnData,
+        adata2: anndata.AnnData,
         batch_col: str = 'batch_indices',
         batch_size: int = 2000,
         counts_layer=None,
@@ -790,7 +831,7 @@ class scCLIP(nn.Module):
         """Docstring (TODO)
         """
         sampler = CellSampler(
-            adata_1, adata_2,
+            adata1, adata2,
             require_counts=self.use_decoder,
             counts_layer=counts_layer,
             transformed_obsm=transformed_obsm,
@@ -805,11 +846,14 @@ class scCLIP(nn.Module):
                 callback(data_dict, fwd_dict)
 
     def pred_mod1_mod2_forward(self,
-        data_dict: Mapping[str, torch.Tensor],
-        hyper_param_dict: Mapping[str, Any] = dict()
+        data_dict: Mapping[str, torch.Tensor]
     ) -> Mapping[str, Any]:
-        """
-        Forward from mod1 to mod2
+        """Forward pass for predicting first data modality from second data modality.
+
+        Parameters
+        ----------
+        data_dict
+            Dictionary containing the minibatch training data.
         """
         mod1_input = data_dict["cells_1_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
@@ -829,10 +873,13 @@ class scCLIP(nn.Module):
 
     def pred_mod2_mod1_forward(self,
         data_dict: Mapping[str, torch.Tensor],
-        hyper_param_dict: Mapping[str, Any] = dict()
     ) -> Mapping[str, Any]:
-        """
-        Forward from mod2 to mod1
+        """Forward pass for predicting second data modality from the data modality.
+
+        Parameters
+        ----------
+        data_dict
+            Dictionary containing the minibatch training data.
         """
         mod2_input = data_dict["cells_2_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
@@ -849,115 +896,6 @@ class scCLIP(nn.Module):
             reconstruction=mod1_reconstruct['mod1_reconstruct'],
         )
         return fwd_dict
-
-    def pred_mod1_to_mod2(self,
-        adata_1: anndata.AnnData,
-        transformed_obsm: Optional[Union[str, List[str]]] = None,
-        batch_size: int = 2000,
-        batch_col: str = 'batch_indices',
-        inplace: bool = True,
-    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
-        """
-        Predict from modality 1 to modality 2.
-        """
-        hyper_param_dict = dict(decode=True)
-        sampler = CellSampler(
-            adata_1,
-            adata_1,  # We will ignore the second modality
-            transformed_obsm=transformed_obsm,
-            batch_size=batch_size,
-            sample_batch_id=self.need_batch,
-            n_epochs=1,
-            batch_col=batch_col,
-            shuffle=False
-        )
-
-        self.eval()
-        embs = []
-        features = []
-        for data_dict in sampler:
-            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self.pred_mod1_mod2_forward(data_dict, hyper_param_dict)
-            embs.append(fwd_dict['reconstruction'].detach().cpu())
-            features.append(fwd_dict['latents'].detach().cpu())
-        
-        # embs = {name: torch.cat(embs[name], dim=0).numpy() for name in ['mod1_pred', 'mod2_pred']}
-        embs = torch.cat(embs, dim=0).numpy()
-        features = torch.cat(features, dim=0).numpy()
-
-        if inplace:
-            adata_1.obsm.update({'mod2_imputed': embs, 'mod1_features': features})
-            return None
-        else:
-            return embs
-
-    def pred_mod2_to_mod1(self,
-        adata_2: anndata.AnnData,
-        transformed_obsm: Optional[Union[str, List[str]]] = None,
-        batch_size: int = 2000,
-        batch_col: str = 'batch_indices',
-        inplace: bool = True,
-    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
-        """
-        Predict from modality 2 to modality 1
-        """
-        hyper_param_dict = dict(decode=True)
-        sampler = CellSampler(
-            adata_2,
-            adata_2,  # We will ignore the second modality
-            transformed_obsm=transformed_obsm,
-            batch_size=batch_size,
-            sample_batch_id=self.need_batch,
-            n_epochs=1,
-            batch_col=batch_col,
-            shuffle=False
-        )
-
-        self.eval()
-        embs = []
-        features = []
-        for data_dict in sampler:
-            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self.pred_mod2_mod1_forward(data_dict, hyper_param_dict)
-            embs.append(fwd_dict['reconstruction'].detach().cpu())
-            features.append(fwd_dict['latents'].detach().cpu())
-        
-        embs = torch.cat(embs, dim=0).numpy()
-        features = torch.cat(features, dim=0).numpy()
-
-        if inplace:
-            adata_2.obsm.update({'mod1_imputed': embs, 'mod2_features': features})
-            return None
-        else:
-            return embs
-
-    def predict_iterative(self,
-        adata,
-        transformed_obsm: str,  # something like X_pca
-        embedding: str = 'mod1_features',
-        num_iter: int = 100,
-        batch_size: int = 10000,
-        batch_col: str = 'batch_indices'
-    ):
-        """
-        Predict mod2 features from mod1_features iteratively
-        """
-        mod1_features = torch.Tensor(adata.obsm[embedding])
-        mod2_pred = torch.nn.Parameter(torch.rand(adata.obsm[transformed_obsm].shape))
-
-        self.eval()
-        optimizer = torch.optim.SGD([mod2_pred], lr=0.005)
-
-        epoch = 0
-        while epoch < num_iter:
-            optimizer.zero_grad()
-            mod2_features = F.normalize(self.mod2_encoder(mod2_pred))
-            loss = -torch.sum(mod1_features * mod2_features, dim=-1).mean()
-            loss.backward()
-            optimizer.step()
-            epoch += 1
-        
-        return mod2_pred.cpu().detach().numpy()
 
 
 class HypersphericalUniform(torch.distributions.Distribution):

@@ -21,9 +21,9 @@ class ModelName:
     Parameters
     ----------
     adata1
-        AnnData object corresponding to one modality of a multimodal single-cell dataset
+        AnnData object corresponding to the first modality of a multimodal single-cell dataset
     adata2
-        AnnData object corresponding to the other modality of a multimodal single-cell dataset
+        AnnData object corresponding to the second modality of a multimodal single-cell dataset
     mod1_type
         The modality type of adata1. One of the following:
 
@@ -161,7 +161,6 @@ class ModelName:
             n_epochs=epochs,
             need_reconstruction=need_reconstruction,
             batch_col=self.batch_col,
-            require_counts=need_reconstruction
         )
 
     def get_latent_representation(
@@ -384,8 +383,8 @@ class ModelName:
         latents = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
-            fwd_dict = self.model.pred_mod1_mod2_forward(data_dict, dict()) if mod1_to_mod2 \
-                else self.model.pred_mod2_mod1_forward(data_dict, dict())
+            fwd_dict = self.model.pred_mod1_mod2_forward(data_dict) if mod1_to_mod2 \
+                else self.model.pred_mod2_mod1_forward(data_dict)
             embs.append(fwd_dict['reconstruction'].detach().cpu())
             latents.append(fwd_dict['latents'].detach().cpu()) # TODO: This is probably wrong, latents are the hypersphere
         embs = torch.cat(embs, dim=0).numpy()

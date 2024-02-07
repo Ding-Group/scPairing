@@ -27,31 +27,38 @@ class UnsupervisedTrainer:
     Sets up the random seed, dataset split, optimizer and logger, and executes
     training and evaluation loop.
 
-    Attributes:
-        attr_fname: a dict mapping attributes of the trainer (a model or an
-            optimizer) to file name prefixes of checkpoints.
-        model: the model to be trained.
-        optimizer: the optimizer used to train the model.
-        lr: the current learning rate.
-        init_lr: the initial learning rate.
-        lr_decay: the negative log of the decay rate of the learning rate.
-            After each training step, lr = lr * exp(-lr_decay).
-        batch_size: the training batch size.
-        steps_per_epoch: #training steps to cover an epoch.
-        device: device the model is on.
-        step: current step.
-        epoch: current epoch.
-        seed: random seed.
-        train_instance_name: name for this train instance for checkpointing.
-        ckpt_dir: directory to store the logs, the checkpoints and the plots.
-    
-    New attributes:
-        adata_1: first modality single-cell dataset
-        adata_2: second modality single-cell dataset
-        train_adata_mod1: the training data. Contains (1 - test_ratio) x 100% of
-            adata_1.
-        test_adata_mod2: the test data. Contains test_ratio x 100% of adata_2.
-        counts_layer: layer in AnnData corresponding to raw counts. If None, use .X
+    Parameters
+    ----------
+    model
+        The model to be trained.
+    adata1
+        AnnData object corresponding to the first modality of a multimodal single-cell dataset.
+    adata2
+        AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+    adata3: the intact single-cell dataset (third modality), if there is one.
+    counts_layer
+        Key(s) in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
+        If a string is provided, the same key will be applied to both ``adata1.layers`` and ``adata2.layers``.
+        If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
+    transformed_obsm
+        Key(s) in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
+        representations of each individual modality. If a string is provided, the same key will
+        be applied to both ``adata1.obsm`` and ``adata2.obsm``.
+    ckpt_dir
+        Directory to store the logs, the checkpoints and the plots.
+    test_ratio
+        Ratio of the test data.
+    init_lr
+        Initial learning rate.
+    lr_decay
+        The negative log of the decay rate of the learning rate.
+        After each training step, lr = lr * ``exp(-lr_decay)``.
+    batch_size
+        Minibatch size.
+    train_instance_name
+        Name for this train instance for checkpointing.
+    seed
+        Random seed.
     """
 
     attr_fname: Mapping[str, str] = dict(
@@ -62,9 +69,9 @@ class UnsupervisedTrainer:
     @log_arguments
     def __init__(self,
         model: model.scCLIP,
-        adata_1: anndata.AnnData,
-        adata_2: anndata.AnnData,
-        adata_3: Optional[anndata.AnnData] = None,
+        adata1: anndata.AnnData,
+        adata2: anndata.AnnData,
+        adata3: Optional[anndata.AnnData] = None,
         counts_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         ckpt_dir: Union[str, None] = None,
@@ -77,43 +84,18 @@ class UnsupervisedTrainer:
         train_instance_name: str = "scCLIP",
         seed: int = -1,
     ) -> None:
-        """Initializes the UnsupervisedTrainer object.
-
-        Args:
-            model: the model to be trained.
-            adata_1: the intact single-cell dataset (first modality).
-            adata_2: the intact single-cell dataset (second modality).
-            adata_3: the intact single-cell dataset (third modality), if there is one.
-            counts_layer: layer corresponding to raw counts.
-            transformed_obsm: key in obsm corresponding to transformed data.
-            ckpt_dir: directory to store the logs, the checkpoints and the
-                plots. If training from scratch (restore_epoch = 0), this would
-                be the parent directory of the actual directory storing the
-                checkpoints (self.ckpt_dir = ckpt_dir / train_instance_name);
-                if restoring from checkpoints, this would be the directory
-                holding the checkpoint files.
-            test_ratio: ratio of the test data in adata.
-            init_lr: the initial learning rate.
-            lr_decay: the negative log of the decay rate of the learning rate.
-                After each training step, lr = lr * exp(-lr_decay).
-            batch_size: the training batch size.
-            train_instance_name: name for this train instance for checkpointing.
-            restore_epoch: the epoch to restore from ckpt_dir.
-            seed: random seed.
-        """
-
         if seed >= 0:
             set_seed(seed)
 
         self.model: model.scCLIP = model
 
-        self.train_adata_1 = self.test_adata_1 = self.adata_1 = adata_1
-        self.train_adata_2 = self.test_adata_2 = self.adata_2 = adata_2
-        self.train_adata_3 = self.test_adata_3 = self.adata_3 = adata_3
+        self.train_adata1 = self.test_adata1 = self.adata1 = adata1
+        self.train_adata2 = self.test_adata2 = self.adata2 = adata2
+        self.train_adata3 = self.test_adata3 = self.adata3 = adata3
         if test_ratio > 0:
-            self.train_adata_1, self.test_adata_1, self.train_adata_2, self.test_adata_2 = \
-                train_test_split_cite(adata_1, adata_2, test_ratio, seed=data_split_seed)
-        
+            self.train_adata1, self.test_adata1, self.train_adata2, self.test_adata2 = \
+                train_test_split_cite(adata1, adata2, test_ratio, seed=data_split_seed)
+
         self.counts_layer = counts_layer
 
         self.transformed_obsm = transformed_obsm
@@ -139,15 +121,12 @@ class UnsupervisedTrainer:
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
-        self.steps_per_epoch = max(self.train_adata_1.n_obs / self.batch_size, 1)
+        self.steps_per_epoch = max(self.train_adata1.n_obs / self.batch_size, 1)
         self.device = model.device
         self.step = self.epoch = 0
         self.seed = seed
 
         self.train_instance_name = train_instance_name
-        # if restore_epoch > 0 and type(self) == UnsupervisedTrainer:
-        #     self.ckpt_dir = ckpt_dir
-        #     self.load_ckpt(restore_epoch, self.ckpt_dir)
         if ckpt_dir is not None:
             self.ckpt_dir = os.path.join(ckpt_dir, f"{self.train_instance_name}_{time.strftime('%m_%d-%H_%M_%S')}")
             os.makedirs(self.ckpt_dir, exist_ok=True)
@@ -155,30 +134,6 @@ class UnsupervisedTrainer:
             _logger.info(f'ckpt_dir: {self.ckpt_dir}')
         else:
             self.ckpt_dir = None
-
-    # @log_arguments
-    # def load_ckpt(self, restore_epoch: int, ckpt_dir: Union[str, None] = None) -> None:
-    #     """Loads model checkpoints.
-
-    #     After loading, self.step, self.epoch and self.lr are set to
-    #     the corresponding values, and the loger will be re-initialized.
-
-    #     Args:
-    #         restore_epoch: the epoch to restore.
-    #         ckpt_dir: the directory containing the model checkpoints. If None,
-    #             set to self.ckpt_dir.
-    #     """
-
-    #     if ckpt_dir is None:
-    #         ckpt_dir = self.ckpt_dir
-    #     assert ckpt_dir is not None and os.path.exists(ckpt_dir), f"ckpt_dir {ckpt_dir} does not exist."
-    #     for attr, fname in self.attr_fname.items():
-    #         fpath = os.path.join(ckpt_dir, f'{fname}-{restore_epoch}')
-    #         getattr(self, attr).load_state_dict(torch.load(fpath))
-    #     _logger.info(f'Parameters and optimizers restored from {ckpt_dir}.')
-    #     initialize_logger(self.ckpt_dir)
-    #     _logger.info(f'ckpt_dir: {self.ckpt_dir}')
-    #     self.update_step(restore_epoch * self.steps_per_epoch)
 
     @staticmethod
     def _calc_weight(
@@ -189,19 +144,22 @@ class UnsupervisedTrainer:
         min_weight: float = 0.,
         max_weight: float = 1e-7
     ) -> float:
-        """Calculates weights.
+        """Returns the current weight for a loss term.
 
-        Args:
-            epoch: current epoch.
-            n_epochs: the total number of epochs to train the model.
-            cutoff_ratio: ratio of cutoff epochs (set weight to zero) and
-                n_epochs.
-            warmup_ratio: ratio of warmup epochs and n_epochs.
-            min_weight: minimum weight.
-            max_weight: maximum weight.
-
-        Returns:
-            The current weight of the KL term.
+        Parameters
+        ----------
+        epoch
+            Current epoch.
+        n_epochs
+            The total number of epochs to train the model.
+        cutoff_ratio
+            Ratio of cutoff epochs (set weight to zero) and ``n_epochs``.
+        warmup_ratio
+            Ratio of warmup epochs and ``n_epochs``.
+        min_weight
+            Minimum weight.
+        max_weight
+            Maximum weight.
         """
 
         fully_warmup_epoch = n_epochs * warmup_ratio
@@ -217,9 +175,10 @@ class UnsupervisedTrainer:
     def update_step(self, jump_to_step: Union[None, int] = None) -> None:
         """Aligns the current step, epoch and lr to the given step number.
 
-        Args:
-            jump_to_step: the step number to jump to. If None, increment the
-                step number by one.
+        Parameters
+        ----------
+        jump_to_step
+            The step number to jump to. If None, increment the step number by one.
         """
 
         if jump_to_step is None:
@@ -252,41 +211,33 @@ class UnsupervisedTrainer:
     ) -> None:
         """Trains the model, optionally evaluates performance and logs results.
 
-        Args:
-            n_epochs: the total number of epochs to train the model.
-            eval_every: evaluate the model every this many epochs.
-            kl_warmup_ratio: ratio of KL warmup epochs and n_epochs.
-            min_kl_weight: minimum weight of the KL term.
-            max_kl_weight: maximum weight of the KL term.
-            eval: whether to evaluate the model.
-            batch_col: a key in adata.obs to the batch column.
-            save_model_ckpt: whether to save the model checkpoints.
-            record_log_path: file path to log the training records. If None, do
+        Parameters
+        ----------
+        n_epochs
+            The total number of epochs to train the model.
+        eval_every
+            Evaluate the model every this many epochs.
+        kl_warmup_ratio
+            Ratio of KL warmup epochs and n_epochs.
+        min_kl_weight
+            Minimum weight of the KL term.
+        max_kl_weight
+            Maximum weight of the KL term.
+        batch_col
+            A key in every AnnData's `.obs` for the batch column.
+        save_model_ckpt
+            Whether to save the model checkpoints.
+        record_log_path: file path to log the training records. If None, do
                 not log.
-            writer: an initialized SummaryWriter for tensorboard logging.
-            eval_result_log_path: file path to log the evaluation results. If
-                None, do not log.
-            eval_kwargs: kwargs to pass to the evaluate function.
-            train_kwargs: kwargs to pass to self.do_train_step().
-
-        New parameters:
-            reconstruct_warmup_ratio: ratio of contrastive warmup epochs to n_epochs
-            reconstruct_cutoff_ratio: ratio of cutoff ratios to n_epochs
-            min_reconstruct_weight: minimum weight of reconstruction term
-            max_reconstruct_weight: maximum weight of reconstruction term
-            flip_contrastive_reconstruct: proportion of epochs at which to switch from
-                training using contrastive loss to using reconstructive loss
-            flip_clip_dist: proporition of epochs at which to switch from training using
-                clip loss to distance-based loss.
         """
         if ping_every is None:
             ping_every = n_epochs
         
         # set up sampler and dataloader
-        if self.adata_3 is None:
+        if self.adata3 is None:
             sampler = CellSampler(
-                self.train_adata_1,
-                self.train_adata_2,
+                self.train_adata1,
+                self.train_adata2,
                 self.batch_size,
                 require_counts=need_reconstruction,
                 counts_layer=self.counts_layer,
@@ -297,9 +248,9 @@ class UnsupervisedTrainer:
             )
         else:
             sampler = TriCellSampler(
-                self.train_adata_1,
-                self.train_adata_2,
-                self.train_adata_3,
+                self.train_adata1,
+                self.train_adata2,
+                self.train_adata3,
                 self.batch_size,
                 require_counts=need_reconstruction,
                 counts_layer=self.counts_layer,
@@ -310,17 +261,8 @@ class UnsupervisedTrainer:
             )
         dataloader = iter(sampler)
         
-        # set up the stats recorder
-        # if os.path.exists(os.path.join(self.ckpt_dir, 'stats.csv')):
-        #     log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'a')
-        # else:
-        #     log_file = open(os.path.join(self.ckpt_dir, 'stats.csv'), 'w')
-        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_1.obs)
+        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata1.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
-        next_ping_epoch = min(int(np.ceil(self.epoch / ping_every) * ping_every), n_epochs)
-
-        # with open(os.path.join(self.ckpt_dir, 'device.txt'), 'w') as f:
-        #     f.write(str(self.model.device))
 
         while self.epoch < n_epochs:
             # Train one epoch
@@ -329,11 +271,7 @@ class UnsupervisedTrainer:
                 kl_warmup_ratio=kl_warmup_ratio,
                 min_kl_weight=min_kl_weight,
                 max_kl_weight=max_kl_weight,
-                **train_kwargs
             )
-            # if self.epoch == 0:
-                # log_file.write(','.join(['epoch'] + list(new_record.keys())) + '\n')
-            # log_file.write(','.join(map(str, [self.epoch] + list(new_record.values()))) + '\n')
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
 
@@ -351,8 +289,8 @@ class UnsupervisedTrainer:
 
                 # log statistics of tracked items
                 recorder.log_and_clear_record()
-                if self.test_adata_1 is not self.adata_1:
-                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata_1, self.test_adata_2, self.batch_size, batch_col=batch_col, emb_names=[])
+                if self.test_adata1 is not self.adata1:
+                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata1, self.test_adata2, self.batch_size, batch_col=batch_col, emb_names=[])
                     if test_nll is not None:
                         _logger.info(f'test nll: {test_nll:7.4f}')
                 else:
@@ -365,24 +303,31 @@ class UnsupervisedTrainer:
                 _logger.info('=' * 10 + f'End of evaluation' + '=' * 10)
                 next_ckpt_epoch = min(eval_every + next_ckpt_epoch, n_epochs)
 
-            if self.epoch >= next_ping_epoch:
-                # with open(os.path.join(self.ckpt_dir, 'ping.txt'), 'w') as f:
-                #     f.write(str(self.epoch))
-                next_ping_epoch = ping_every + next_ping_epoch
-
         # log_file.close()
         del recorder
         _logger.info("Optimization Finished: %s" % self.ckpt_dir)
 
     def save_model_and_optimizer(self, next_ckpt_epoch: int) -> None:
-        """Docstring (TODO)
+        """Saves the model and optimizer in the checkpoint directory.
+
+        Parameters
+        ----------
+        next_ckpt_epoch
+            The epoch which the model and optimizer is saved at.
         """
 
         for attr, fname in self.attr_fname.items():
             torch.save(getattr(self, attr).state_dict(), os.path.join(self.ckpt_dir, f'{fname}-{next_ckpt_epoch}'))
 
     def do_train_step(self, dataloader, **kwargs) -> Mapping[str, torch.Tensor]:
-        """Docstring (TODO)
+        """Train the model for one step
+
+        Parameters
+        ----------
+        dataloader
+            Batch sampler to get training data.
+        **kwargs
+            Keyword arguments for constructing hyperparameters.
         """
 
         # construct hyper_param_dict
