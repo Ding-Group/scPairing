@@ -7,3 +7,5 @@ libraries/
 */__pycache__
 *.sh
 *.out
+*/.ipynb_checkpoints
+

@@ -15,12 +15,12 @@ from logging_utils import log_arguments
 from batch_sampler import TriCellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
-from .losses import ClipLoss, BatchClipLoss, DebiasedClipLoss, SigmoidLoss
+from .losses import ClipLoss, DebiasedClipLoss, SigmoidLoss
 
 _logger = logging.getLogger(__name__)
 
 
-Loss = Literal['clip', 'debiased_clip', 'batch_clip', 'sigmoid']
+Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']
 
 
@@ -201,8 +201,6 @@ class scCLIP(nn.Module):
             self.clip_loss = SigmoidLoss()
             self.bias = nn.Parameter(torch.ones([]) * 0)
             self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        elif loss_method == 'batch_clip':
-            self.clip_loss = BatchClipLoss(tau)
 
         self.combine_method = combine_method
         self.use_decoder: bool = use_decoder
@@ -457,8 +455,6 @@ class scCLIP(nn.Module):
         if self.loss_method == 'sigmoid':
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, self.bias) + self.clip_loss(mod2_features, mod3_features, logit_scale, self.bias)
             fwd_dict['bias'] = self.bias
-        elif self.loss_method == 'batch_clip':
-            contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, batch_indices)
         else:
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale) + \
                 self.clip_loss(mod2_features, mod3_features, logit_scale) + \

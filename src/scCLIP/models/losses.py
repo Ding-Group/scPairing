@@ -11,17 +11,13 @@ class ClipLoss(nn.Module):
     """
     def __init__(
         self,
-        cache_labels: bool = False,
-        downsample_clip: bool = False,
-        downsample_clip_prob: float = 0.5
+        cache_labels: bool = False
     ) -> None:
         """
         Initialize the CLIP loss
         """
         super().__init__()
         self.cache_labels = cache_labels
-        self.downsample_clip = downsample_clip
-        self.downsample_clip_prob = downsample_clip_prob
         
         # cache state
         self.prev_num_logits = 0
@@ -55,13 +51,6 @@ class ClipLoss(nn.Module):
         Compute forward Clip Loss. It is the average of the cross entropies computed
         from the two logits, logits_per_atac and logits_per_gex
         """
-        if self.downsample_clip:
-            mask = torch.rand(atac_features.shape[0]) < self.downsample_clip_prob
-            atac_features = atac_features[mask, :]
-            gex_features = gex_features[mask, :]
-            if logit_scale.ndim > 0:
-                logit_scale = logit_scale[mask]
-
         device = atac_features.device
         logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
 
@@ -80,9 +69,7 @@ class DebiasedClipLoss(nn.Module):
     def __init__(
         self,
         tau: float = 0.3,
-        cache_labels: bool = False,
-        downsample_clip: bool = False,
-        downsample_prob: float = 0.5
+        cache_labels: bool = False
     ) -> None:
         """
         Initialize the CLIP loss
@@ -90,8 +77,6 @@ class DebiasedClipLoss(nn.Module):
         super().__init__()
         self.cache_labels = cache_labels
         self.tau = tau
-        self.downsample_clip = downsample_clip
-        self.downsample_prob = downsample_prob
         
         # cache state
         self.prev_num_logits = 0
@@ -120,44 +105,11 @@ class DebiasedClipLoss(nn.Module):
         Compute forward Clip Loss. It is the average of the cross entropies computed
         from the two logits, logits_per_atac and logits_per_gex
         """
-        if self.downsample_clip:
-            mask = torch.rand(atac_features.shape[0]) < self.downsample_prob
-            atac_features = atac_features[mask, :]
-            gex_features = gex_features[mask, :]
-            if logit_scale.ndim > 0:
-                logit_scale = logit_scale[mask]
-
         logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
 
         total_loss = (self.calc_loss(logits_per_atac, logit_scale) + self.calc_loss(logits_per_gex, logit_scale)) / 2
 
         return total_loss.mean()
-
-
-class BatchClipLoss(ClipLoss):
-    """
-    CLIP loss applied to only a batch?
-    """
-    def __init__(self, weight: float):
-        """
-        l is the weight of 
-        """
-        super().__init__()
-        self.weight = weight
-    
-    def forward(self, atac_features: torch.Tensor, gex_features: torch.Tensor, logit_scale, batch_indices: torch.Tensor):
-        device = atac_features.device
-        logits_per_atac, logits_per_gex = self.get_logits(atac_features, gex_features, logit_scale)
-        batch_equals = batch_indices[:, None] - batch_indices[None, :]
-        batch_equals[batch_equals != 0] = self.weight
-        batch_equals[batch_equals == 0] = 1
-
-        logits_per_atac = logits_per_atac + batch_equals.log() - (logits_per_atac.exp() * batch_equals).sum(-1).log().unsqueeze(-1)
-        logits_per_gex = logits_per_gex + batch_equals.log() - (logits_per_gex.exp() * batch_equals).sum(-1).log().unsqueeze(-1)
-
-        labels = self.get_ground_truth(device, logits_per_atac.shape[0])
-
-        return (F.nll_loss(logits_per_atac, labels) + F.nll_loss(logits_per_gex, labels)) / 2
 
 
 class SigmoidLoss(nn.Module):
