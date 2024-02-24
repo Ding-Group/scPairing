@@ -25,21 +25,6 @@ Combine = Literal['dropout', 'average']
 _logger = logging.getLogger(__name__)
 
 
-def set_seed(seed: int) -> None:
-    """Sets the random seed to seed.
-
-    Parameters
-    ----------
-    seed
-        The random seed.
-    """
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    random.seed(seed)
-    np.random.seed(seed)
-
-
 class scCLIP(nn.Module):
     """Variational autoencoder model
 
@@ -118,8 +103,6 @@ class scCLIP(nn.Module):
     cap_temperature
         Maximum temperature the CLIP loss can reach during training. If None, the
         temperature is unbounded.
-    seed
-        Random seed for model reproducibility.
     """
     emb_names: Sequence[str] = ['mod1_features', 'mod2_features']
 
@@ -150,7 +133,6 @@ class scCLIP(nn.Module):
         distance_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
-        seed=None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     ) -> None:
         super().__init__()
@@ -172,9 +154,6 @@ class scCLIP(nn.Module):
         if (reconstruct_mod1_fn is not None or reconstruct_mod2_fn is not None) and not use_decoder:
             _logger.warning("Reconstruction functions were provided but decoding was turned off.\n"
                             "The provided reconstruction functions will not be used.")
-
-        if seed:
-            set_seed(seed)
 
         # Model parameters
         self.device: torch.device = device
@@ -353,10 +332,8 @@ class scCLIP(nn.Module):
             Whether the model is decoding cells with known low-dimension representations
             and raw counts, or is imputing unseen data.
         """
-        if decode_mod1:
-            decoder, name = self.mod1_decoder, 'mod1' 
-        else:
-            decoder, name = self.mod2_decoder, 'mod2'
+        decoder, name = (self.mod1_decoder, 'mod1') if decode_mod1 else (self.mod2_decoder, 'mod2')
+
         approx_features = decoder(features)
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
         if not self.use_decoder:
@@ -365,8 +342,8 @@ class scCLIP(nn.Module):
                 f'{name}_reconstruct_loss': torch.zeros([]),
                 'nll': loss
             }
-        reconstruct_fn, reconstructor, mod_type, n_output = self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim \
-            if decode_mod1 else self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim
+        reconstruct_fn, reconstructor, mod_type, n_output = (self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim) \
+            if decode_mod1 else (self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim)
         if reconstruct_fn is None:
             if self.n_batches > 1:
                 batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
@@ -773,7 +750,7 @@ class scCLIP(nn.Module):
         data_dict
             Dictionary containing the minibatch training data.
         """
-        mod2_input = data_dict["cells_2_transformed"]
+        mod2_input = data_dict["cells_1_transformed"]  # Single modality data
         batch_indices = data_dict.get('batch_indices', None)
         mod2_features = self.mod2_encoder(mod2_input)
         mu = mod2_features[:, :self.emb_dim]

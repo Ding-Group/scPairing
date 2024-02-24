@@ -6,13 +6,33 @@ import anndata as ad
 from anndata import AnnData
 import numpy as np
 import torch
+import random
 
 from models.model import scCLIP, Modalities
-from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
+from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 from batch_sampler import CellSampler
 
 
 _logger = logging.getLogger(__name__)
+
+
+def set_seed(seed: int) -> None:
+    """Sets the random seed to seed.
+    Borrowed from https://gist.github.com/Guitaricet/28fbb2a753b1bb888ef0b2731c03c031
+
+    Parameters
+    ----------
+    seed
+        The random seed.
+    """
+    random.seed(seed)     # python random generator
+    np.random.seed(seed)  # numpy random generator
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 class ModelName:
@@ -85,6 +105,10 @@ class ModelName:
         if adata1.n_obs != adata2.n_obs:
             raise ValueError("The two AnnData objects have different numbers of cells.")
 
+        self.seed = seed
+        if seed:
+            set_seed(seed)
+
         if isinstance(transformed_obsm, str):
             transformed_obsm = [transformed_obsm, transformed_obsm]
         if isinstance(counts_layer, str) or counts_layer is None:
@@ -118,7 +142,6 @@ class ModelName:
             decoder_hidden_dims=decoder_hidden_dims,
             reconstruct_mod1_fn=reconstruct_mod1_fn,
             reconstruct_mod2_fn=reconstruct_mod2_fn,
-            seed=seed,
             **model_kwargs
         )
 
@@ -161,6 +184,7 @@ class ModelName:
             n_epochs=epochs,
             need_reconstruction=need_reconstruction,
             batch_col=self.batch_col,
+            seed=self.seed
         )
 
     def get_latent_representation(
@@ -194,7 +218,7 @@ class ModelName:
             sample_batch_id=self.model.need_batch,
             n_epochs=1,
             batch_col=self.batch_col,
-            shuffle=False   
+            shuffle=False
         )
 
         mod1_features = []
@@ -345,7 +369,6 @@ class ModelName:
         batch_size
             Minibatch size.
         """
-        return_latents = False
         if not self.model.use_decoder:
             if mod1_to_mod2 and self.model.reconstruct_mod2_fn is None:
                 _logger.warning(
@@ -353,14 +376,12 @@ class ModelName:
                     f"for the second modality. The reconstructed {self.transformed_obsm[1]} "
                     "will be returned."
                 )
-                return_latents = True
             elif not mod1_to_mod2 and self.model.reconstruct_mod1_fn is None:
                 _logger.warning(
                     "The model has no decoder and no custom reconstruction function "
                     f"for the first modality. The reconstructed {self.transformed_obsm[0]} "
                     "will be returned."
                 )
-                return_latents = True
 
         if mod1_to_mod2 and adata is None:
             adata = self.adata1
@@ -369,8 +390,7 @@ class ModelName:
 
         self.model.eval()
         sampler = CellSampler(
-            adata if mod1_to_mod2 else self.adata1,
-            adata if not mod1_to_mod2 else self.adata2,
+            adata,
             transformed_obsm=self.transformed_obsm,
             batch_size=batch_size,
             sample_batch_id=self.model.need_batch,
@@ -386,10 +406,10 @@ class ModelName:
             fwd_dict = self.model.pred_mod1_mod2_forward(data_dict) if mod1_to_mod2 \
                 else self.model.pred_mod2_mod1_forward(data_dict)
             embs.append(fwd_dict['reconstruction'].detach().cpu())
-            latents.append(fwd_dict['latents'].detach().cpu()) # TODO: This is probably wrong, latents are the hypersphere
+            latents.append(fwd_dict['latents'].detach().cpu())
         embs = torch.cat(embs, dim=0).numpy()
         latents = torch.cat(latents, dim=0).numpy()
-        return latents if return_latents else embs
+        return embs, latents
 
     def save(
         self,

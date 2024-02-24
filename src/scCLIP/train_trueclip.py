@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 
 from models.scCLIP import scCLIP
-from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
+from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import KFold

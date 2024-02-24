@@ -23,9 +23,9 @@ def get_fully_connected_layers(
     layers = []
     for i, size in enumerate(hidden_dims):
         lin = nn.Linear(input_dim, size)
-        nn.init.xavier_normal_(lin.weight)
+        # nn.init.xavier_normal_(lin.weight)
         layers.append(lin)
-        layers.append(nn.SiLU())
+        layers.append(nn.ELU())
         if norm_type == 'layer':
             layers.append(nn.LayerNorm(size))
         elif norm_type == 'batch':

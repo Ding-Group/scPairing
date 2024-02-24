@@ -2,24 +2,25 @@ import sys
 import os
 import argparse
 import pickle
+import wandb
 sys.path.append('/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/src/scCLIP')
 
 os.environ[ 'NUMBA_CACHE_DIR' ] = '/scratch/st-jiaruid-1/yinian/tmp/' # https://github.com/scverse/scanpy/issues/2113
 
 import scanpy as sc
-import numpy as np
 import anndata as ad
+import numpy as np
 import yaml
 from pathlib import Path
-import torch
 
 from main import ModelName
-# from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
 
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import KFold
 
 def main(config, seed=0):
+    config['seed'] = seed
+    wandb.init(project="modelname", config=config)
     files = config['files']
     model_params = config['model_params']
     trainer_params = config['trainer_params']
@@ -31,8 +32,8 @@ def main(config, seed=0):
     mod1_adata = ad.concat([ad.read_h5ad(f) for f in mod1_files], label="batch_indices", merge='same')
     mod2_adata = ad.concat([ad.read_h5ad(f) for f in mod2_files], label="batch_indices", merge='same')
 
-    mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable].copy()
-    sc.pp.filter_genes(mod2_adata, min_cells=mod2_adata.shape[0] * 0.01)
+    # mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable].copy()
+    # sc.pp.filter_genes(mod2_adata, min_cells=mod2_adata.shape[0] * 0.01)
 
     model = ModelName(
         mod1_adata, mod2_adata,
@@ -68,18 +69,51 @@ def main(config, seed=0):
     latents = model.get_latent_representation()
     mod1_adata.obsm['mod1_features'] = mod2_adata.obsm['mod1_features'] = latents[0]
     mod1_adata.obsm['mod2_features'] = mod2_adata.obsm['mod2_features'] = latents[1]
-
-    if model_params.get('use_decoder', False) and config.get('reconstruct', False):
-        mod1_adata.obsm['mod1_reconstruct'], _ = model.get_normalized_expression()
+    mod1_adata.obsm['concat'] = np.concatenate(latents, axis=1)
 
     save = {
         'mod1_features': mod1_adata.obsm['mod1_features'],
         'mod2_features': mod1_adata.obsm['mod2_features'],
-        'mod1_reconstruct': mod1_adata.obsm['mod1_reconstruct']
     }
+
+    if model_params.get('use_decoder', False) and config.get('reconstruct', False):
+        mod1_adata.obsm['mod1_reconstruct'], _ = model.get_normalized_expression()
+        save['mod1_reconstruct'] = mod1_adata.obsm['mod1_reconstruct']
 
     with open(os.path.join(model.trainer.ckpt_dir, 'embs.pkl'), 'wb') as f:
         pickle.dump(save, f)
+
+    for n in [5, 17, 29, 41, 53, 65]:
+        vals = []
+        for batch in mod1_adata.obs.batch.cat.categories:
+            batch_adata = mod1_adata[mod1_adata.obs.batch == batch]
+            other_adata = mod1_adata[mod1_adata.obs.batch != batch]
+            train_X, train_y = other_adata.obsm['concat'], other_adata.obs['cell_type']
+            test_X, test_y = batch_adata.obsm['concat'], batch_adata.obs['cell_type']
+
+            neigh = KNeighborsClassifier(n_neighbors=n)
+            neigh.fit(train_X, train_y)
+
+            pred_y = neigh.predict(test_X)
+            vals.append(np.sum(pred_y == test_y) / len(test_y))
+        wandb.run.summary[f'Batch {n}-nn Average'] = sum(vals) / len(vals)
+
+    kf = KFold(n_splits=10, shuffle=True, random_state=0)
+    X = mod1_adata.obsm['concat']
+    y = mod1_adata.obs['cell_type']
+    for n in [5, 17, 29, 41, 53, 65]:
+        vals = []
+        for i, (train_index, test_index) in enumerate(kf.split(X)):
+            train_X, train_y = X[train_index], y[train_index]
+            test_X, test_y = X[test_index], y[test_index]
+            neigh = KNeighborsClassifier(n_neighbors=n)
+            neigh.fit(train_X, train_y)
+
+            pred_y = neigh.predict(test_X)
+            vals.append(np.sum(pred_y == test_y) / len(test_y))
+        wandb.run.summary[f'Regular {n}-nn Average'] = sum(vals) / len(vals)
+
+    wandb.finish()
 
 
 if __name__ == '__main__':

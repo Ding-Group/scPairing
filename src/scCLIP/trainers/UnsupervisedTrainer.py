@@ -10,13 +10,13 @@ import numpy as np
 import anndata
 import torch
 from torch import optim
-# from torch.utils.tensorboard import SummaryWriter
+import wandb
 
-from batch_sampler import CellSampler, TriCellSampler
+from batch_sampler import CellSampler
 from eval_utils import evaluate
 from models import model
 from logging_utils import initialize_logger, log_arguments
-from .trainer_utils import train_test_split, train_test_split_cite, set_seed, _stats_recorder
+from .trainer_utils import train_test_split, train_test_split_cite, _stats_recorder
 
 _logger = logging.getLogger(__name__)
 
@@ -57,8 +57,6 @@ class UnsupervisedTrainer:
         Minibatch size.
     train_instance_name
         Name for this train instance for checkpointing.
-    seed
-        Random seed.
     """
 
     attr_fname: Mapping[str, str] = dict(
@@ -81,12 +79,8 @@ class UnsupervisedTrainer:
         lr_decay: float = 6e-5,
         weight_decay: float = 0.,
         batch_size: int = 2000,
-        train_instance_name: str = "scCLIP",
-        seed: int = -1,
+        train_instance_name: str = "scCLIP"
     ) -> None:
-        if seed >= 0:
-            set_seed(seed)
-
         self.model: model.scCLIP = model
 
         self.train_adata1 = self.test_adata1 = self.adata1 = adata1
@@ -124,7 +118,6 @@ class UnsupervisedTrainer:
         self.steps_per_epoch = max(self.train_adata1.n_obs / self.batch_size, 1)
         self.device = model.device
         self.step = self.epoch = 0
-        self.seed = seed
 
         self.train_instance_name = train_instance_name
         if ckpt_dir is not None:
@@ -207,6 +200,7 @@ class UnsupervisedTrainer:
         ping_every: Optional[int] = None,
         record_log_path: Union[str, None] = None,
         writer = None,
+        seed: Optional[int] = None,
         **train_kwargs
     ) -> None:
         """Trains the model, optionally evaluates performance and logs results.
@@ -229,6 +223,8 @@ class UnsupervisedTrainer:
             Whether to save the model checkpoints.
         record_log_path: file path to log the training records. If None, do
                 not log.
+        seed
+            Random seed.
         """
         if ping_every is None:
             ping_every = n_epochs
@@ -238,26 +234,28 @@ class UnsupervisedTrainer:
             sampler = CellSampler(
                 self.train_adata1,
                 self.train_adata2,
-                self.batch_size,
+                batch_size=self.batch_size,
                 require_counts=need_reconstruction,
                 counts_layer=self.counts_layer,
                 transformed_obsm=self.transformed_obsm,
                 sample_batch_id=self.model.need_batch,
                 n_epochs=n_epochs - self.epoch,
-                batch_col=batch_col
+                batch_col=batch_col,
+                rng=np.random.default_rng(seed)
             )
         else:
-            sampler = TriCellSampler(
+            sampler = CellSampler(
                 self.train_adata1,
                 self.train_adata2,
                 self.train_adata3,
-                self.batch_size,
+                batch_size=self.batch_size,
                 require_counts=need_reconstruction,
                 counts_layer=self.counts_layer,
                 transformed_obsm=self.transformed_obsm,
                 sample_batch_id=self.model.need_batch,
                 n_epochs=n_epochs - self.epoch,
-                batch_col=batch_col
+                batch_col=batch_col,
+                rng=np.random.default_rng(seed)
             )
         dataloader = iter(sampler)
         
@@ -341,5 +339,6 @@ class UnsupervisedTrainer:
 
         # train for one step, record tracked items (e.g. loss)
         new_record = self.model.train_step([self.optimizer, self.discriminator_optimizer] , data_dict, hyper_param_dict)
+        wandb.log(new_record)
 
         return new_record, hyper_param_dict

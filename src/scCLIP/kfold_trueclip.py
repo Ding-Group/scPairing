@@ -17,7 +17,7 @@ import scipy
 import torch
 
 from models.scCLIP import scCLIP
-from trainers.UnsupervisedTrainerCLIP import UnsupervisedTrainer
+from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 import scvi
 
 from sklearn.neighbors import KNeighborsClassifier
