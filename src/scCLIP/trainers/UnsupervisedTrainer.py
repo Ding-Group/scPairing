@@ -230,33 +230,19 @@ class UnsupervisedTrainer:
             ping_every = n_epochs
         
         # set up sampler and dataloader
-        if self.adata3 is None:
-            sampler = CellSampler(
-                self.train_adata1,
-                self.train_adata2,
-                batch_size=self.batch_size,
-                require_counts=need_reconstruction,
-                counts_layer=self.counts_layer,
-                transformed_obsm=self.transformed_obsm,
-                sample_batch_id=self.model.need_batch,
-                n_epochs=n_epochs - self.epoch,
-                batch_col=batch_col,
-                rng=np.random.default_rng(seed)
-            )
-        else:
-            sampler = CellSampler(
-                self.train_adata1,
-                self.train_adata2,
-                self.train_adata3,
-                batch_size=self.batch_size,
-                require_counts=need_reconstruction,
-                counts_layer=self.counts_layer,
-                transformed_obsm=self.transformed_obsm,
-                sample_batch_id=self.model.need_batch,
-                n_epochs=n_epochs - self.epoch,
-                batch_col=batch_col,
-                rng=np.random.default_rng(seed)
-            )
+        sampler = CellSampler(
+            self.train_adata1,
+            self.train_adata2,
+            self.train_adata3,
+            batch_size=self.batch_size,
+            require_counts=need_reconstruction,
+            counts_layer=self.counts_layer,
+            transformed_obsm=self.transformed_obsm,
+            sample_batch_id=self.model.need_batch,
+            n_epochs=n_epochs - self.epoch,
+            batch_col=batch_col,
+            rng=np.random.default_rng(seed)
+        )
         dataloader = iter(sampler)
         
         recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata1.obs)
@@ -277,8 +263,6 @@ class UnsupervisedTrainer:
             if self.epoch >= next_ckpt_epoch or self.epoch >= n_epochs:
                 _logger.info('=' * 10 + f'Epoch {next_ckpt_epoch:.0f}' + '=' * 10)
 
-                # log memory cost
-                # _logger.info(repr(psutil.Process().memory_info()))
                 # log current lr and kl_weight
                 if self.lr_decay:
                     _logger.info(f'{"lr":12s}: {self.lr:12.4g}')
