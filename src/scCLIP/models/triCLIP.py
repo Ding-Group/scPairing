@@ -12,6 +12,7 @@ import torch.optim as optim
 from torch.distributions import Normal, Independent
 
 from logging_utils import log_arguments
+from batch_sampler import CellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
 from .losses import ClipLoss, DebiasedClipLoss, SigmoidLoss
