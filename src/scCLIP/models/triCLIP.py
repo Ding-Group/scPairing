@@ -12,7 +12,6 @@ import torch.optim as optim
 from torch.distributions import Normal, Independent
 
 from logging_utils import log_arguments
-from batch_sampler import TriCellSampler
 from .log_likelihood import log_nb_positive
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
 from .losses import ClipLoss, DebiasedClipLoss, SigmoidLoss
@@ -664,7 +663,7 @@ class scCLIP(nn.Module):
     ) -> None:
         """Docstring (TODO)
         """
-        sampler = TriCellSampler(
+        sampler = CellSampler(
             adata_1, adata_2, adata_3,
             require_counts=self.use_decoder,
             counts_layer=counts_layer,
@@ -734,7 +733,7 @@ class scCLIP(nn.Module):
         Predict from modality 1 to modality 2.
         """
         hyper_param_dict = dict(decode=True, reconstruct_weight=1)
-        sampler = TriCellSampler(
+        sampler = CellSampler(
             adata_1,
             adata_1,  # We will ignore the second modality
             use_highly_variable=self.encode_hvar,
@@ -777,7 +776,7 @@ class scCLIP(nn.Module):
         Predict from modality 2 to modality 1
         """
         hyper_param_dict = dict(decode=True, reconstruct_weight=1)
-        sampler = TriCellSampler(
+        sampler = CellSampler(
             adata_2,
             adata_2,  # We will ignore the second modality
             use_highly_variable=self.encode_hvar,
