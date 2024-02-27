@@ -19,70 +19,97 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import KFold
 
 
-scvi.settings.seed = 0
-
 # Running it to get 
-def main(config, output_dir):
-    ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/t2d/cell_cluster/multiome_RNA_raw.h5ad')
-
-    sc.pp.filter_genes(ref, min_cells=5)
-    ref.layers['raw'] = ref.X.copy()
-    sc.pp.normalize_total(ref)
-    sc.pp.log1p(ref)
-    sc.pp.highly_variable_genes(ref, subset=True)
-
-    scvi.model.SCVI.setup_anndata(ref, batch_key='batch')
-    model = scvi.model.SCVI(ref, n_latent=50, gene_likelihood='nb')
-    model.train()
-    model.save(output_dir, overwrite=True, prefix='scvi_hvar_')
-
-    latent = model.get_latent_representation()
-    ref.obsm['X_scVI'] = latent
-
-    with open(os.path.join(output_dir, "hvar_embs.pkl"), 'wb') as f:
-        pickle.dump(latent, f)
-
-
 # def main(config, output_dir):
-#     ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_rna.h5ad')
+#     ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/t2d/cell_cluster/multiome_RNA_raw.h5ad')
 
-#     # ref = ref[:, ref.var.highly_variable].copy()
-#     ref.X = ref.layers['counts']
+#     sc.pp.filter_genes(ref, min_cells=5)
+#     ref.layers['raw'] = ref.X.copy()
+#     sc.pp.normalize_total(ref)
+#     sc.pp.log1p(ref)
+#     sc.pp.highly_variable_genes(ref, subset=True)
 
 #     scvi.model.SCVI.setup_anndata(ref, batch_key='batch')
-#     model = scvi.model.SCVI(ref, n_latent=50)
+#     model = scvi.model.SCVI(ref, n_latent=50, gene_likelihood='nb')
 #     model.train()
-#     model.save(output_dir, overwrite=True, prefix='scvi_')
+#     model.save(output_dir, overwrite=True, prefix='scvi_hvar_')
 
 #     latent = model.get_latent_representation()
 #     ref.obsm['X_scVI'] = latent
 
-#     with open(os.path.join(output_dir, "embs.pkl"), 'wb') as f:
+#     with open(os.path.join(output_dir, "hvar_embs.pkl"), 'wb') as f:
 #         pickle.dump(latent, f)
 
-#     X = ref.obsm['X_scVI']
-#     y = ref.obs['cell_type']
 
-#     kf = KFold(n_splits=10)
-#     with open(os.path.join(output_dir, "knn.txt"), 'w') as f:
-#         for n in [5, 17, 29, 41, 53, 65]:
-#             vals = []
-#             for i, (train_index, test_index) in enumerate(kf.split(X)):
-#                 train_X, train_y = X[train_index], y[train_index]
-#                 test_X, test_y = X[test_index], y[test_index]
-#                 neigh = KNeighborsClassifier(n_neighbors=n)
-#                 neigh.fit(train_X, train_y)
+def main(output_dir, seed):
+    scvi.settings.seed = seed
+    ref = sc.read_h5ad('/arc/project/st-jiaruid-1/yinian/atac-rna/10x_bmmc_rna.h5ad')
 
-#                 pred_y = neigh.predict(test_X)
-#                 vals.append(np.sum(pred_y == test_y) / len(test_y))
-#             f.write(f'n={n}, Average={sum(vals) / len(vals)}\n')
+    ref.X = ref.layers['counts']
 
-    # # Visualization
-    # sc._settings.ScanpyConfig.figdir = Path(output_dir)
+    scvi.model.SCVI.setup_anndata(ref, batch_key='batch')
+    model = scvi.model.SCVI(ref, n_latent=50, dispersion='gene-batch', gene_likelihood='nb')
+    model.train()
+    model.save(output_dir, overwrite=True, prefix='scvi_nb_')
 
-    # sc.pp.neighbors(ref, use_rep='X_scVI')
-    # sc.tl.umap(ref, min_dist=0.1)
-    # sc.pl.umap(ref, color=['cell_type', 'batch'], ncols=1, save='vis.png')
+    latent = model.get_latent_representation()
+    ref.obsm['X_scVI'] = latent
+
+    with open(os.path.join(output_dir, "embs_nb.pkl"), 'wb') as f:
+        pickle.dump(latent, f)
+
+    for n in [5, 17, 29, 41, 53, 65]:
+        vals = []
+        for batch in ref.obs.batch.cat.categories:
+            batch_adata = ref[ref.obs.batch == batch]
+            other_adata = ref[ref.obs.batch != batch]
+            train_X, train_y = other_adata.obsm['X_scVI'], other_adata.obs['cell_type']
+            test_X, test_y = batch_adata.obsm['X_scVI'], batch_adata.obs['cell_type']
+
+            neigh = KNeighborsClassifier(n_neighbors=n)
+            neigh.fit(train_X, train_y)
+
+            pred_y = neigh.predict(test_X)
+            vals.append(np.sum(pred_y == test_y) / len(test_y))
+        print(f'Batch {n}-nn Average = {sum(vals) / len(vals)}')
+
+    # Visualization
+    sc._settings.ScanpyConfig.figdir = Path(output_dir)
+
+    sc.pp.neighbors(ref, use_rep='X_scVI')
+    sc.tl.umap(ref, min_dist=0.3)
+    sc.pl.umap(ref, color=['cell_type', 'batch'], save='vis_nb.png')
+    
+    scvi.settings.seed = seed
+
+    model = scvi.model.SCVI(ref, n_latent=50, dispersion='gene-batch')
+    model.train()
+    model.save(output_dir, overwrite=True, prefix='scvi_zinb_')
+
+    latent = model.get_latent_representation()
+    ref.obsm['X_scVI'] = latent
+
+    with open(os.path.join(output_dir, "embs_nb.pkl"), 'wb') as f:
+        pickle.dump(latent, f)
+
+    for n in [5, 17, 29, 41, 53, 65]:
+        vals = []
+        for batch in ref.obs.batch.cat.categories:
+            batch_adata = ref[ref.obs.batch == batch]
+            other_adata = ref[ref.obs.batch != batch]
+            train_X, train_y = other_adata.obsm['X_scVI'], other_adata.obs['cell_type']
+            test_X, test_y = batch_adata.obsm['X_scVI'], batch_adata.obs['cell_type']
+
+            neigh = KNeighborsClassifier(n_neighbors=n)
+            neigh.fit(train_X, train_y)
+
+            pred_y = neigh.predict(test_X)
+            vals.append(np.sum(pred_y == test_y) / len(test_y))
+        print(f'Batch {n}-nn Average = {sum(vals) / len(vals)}')
+    
+    sc.pp.neighbors(ref, use_rep='X_scVI')
+    sc.tl.umap(ref, min_dist=0.3)
+    sc.pl.umap(ref, color=['cell_type', 'batch'], save='vis_zinb.png')
 
 
 # def main(config, output_dir):
@@ -141,12 +168,12 @@ def main(config, output_dir):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Input config path")
     parser.add_argument(
-        "--path", type=str, required=True, help="Path of the experiment config"
-    )
-    parser.add_argument(
         "--output", type=str, required=True, help="Output directory"
     )
+    parser.add_argument(
+        "--seed", type=int, required=True, help="Seed"
+    )
+    
     args = parser.parse_args()
 
-    config = yaml.safe_load(Path(args.path).read_text())
-    main(config, args.output)
+    main(args.output, args.seed)

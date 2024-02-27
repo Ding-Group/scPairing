@@ -8,4 +8,4 @@ libraries/
 *.sh
 *.out
 */.ipynb_checkpoints
-
+src/benchmarking/wandb/

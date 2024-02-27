@@ -32,9 +32,6 @@ def main(config, seed=0):
     mod1_adata = ad.concat([ad.read_h5ad(f) for f in mod1_files], label="batch_indices", merge='same')
     mod2_adata = ad.concat([ad.read_h5ad(f) for f in mod2_files], label="batch_indices", merge='same')
 
-    # mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable].copy()
-    # sc.pp.filter_genes(mod2_adata, min_cells=mod2_adata.shape[0] * 0.01)
-
     model = ModelName(
         mod1_adata, mod2_adata,
         "rna", "atac",
