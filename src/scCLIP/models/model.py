@@ -269,6 +269,7 @@ class scCLIP(nn.Module):
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
+        self.mod1_reconstructor = self.mod2_reconstructor = None
         if self.use_decoder and self.reconstruct_mod1_fn is None:
             mod1_decoder_input_dim = self.mod1_input_dim + self.n_batches if self.reconstruct_mod1_fn is None and self.n_batches > 1 else self.mod1_input_dim
             self.mod1_reconstructor: nn.Module = get_fully_connected_layers(
@@ -374,7 +375,7 @@ class scCLIP(nn.Module):
                 reconstruction_loss = torch.nn.MSELoss()(counts, reconstruct).mean() / n_output if not is_imputation else torch.zeros([])
             loss += reconstruction_loss
         else:
-            reconstruct, _ = self.reconstruct_mod1_fn(
+            reconstruct, _ = reconstruct_fn(
                 approx_features,
                 embs,
                 counts,
@@ -727,13 +728,12 @@ class scCLIP(nn.Module):
         mod1_input = data_dict["cells_1_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
         mod1_features = self.mod1_encoder(mod1_input)
-        mu = mod1_features[:, :self.emb_dim]
-        mu = F.normalize(mu)
+        mu = F.normalize(mod1_features)
         
         if not self.use_decoder:
             return dict(latents=mu, reconstruction=torch.zeros(mod1_input.shape))
 
-        mod2_reconstruct = self.decode_mod2(mu, None, None, None, None, batch_indices, True)
+        mod2_reconstruct = self.decode(False, mu, None, None, None, None, batch_indices, True)
         fwd_dict = dict(
             latents=mu,
             reconstruction=mod2_reconstruct['mod2_reconstruct']
@@ -753,12 +753,11 @@ class scCLIP(nn.Module):
         mod2_input = data_dict["cells_1_transformed"]  # Single modality data
         batch_indices = data_dict.get('batch_indices', None)
         mod2_features = self.mod2_encoder(mod2_input)
-        mu = mod2_features[:, :self.emb_dim]
-        mu = F.normalize(mu)
+        mu = F.normalize(mod2_features)
         if not self.use_decoder:
             return dict(latents=mu, reconstruction=torch.zeros(mod2_input.shape))
 
-        mod1_reconstruct = self.decode_mod1(mu, None, None, None, None, batch_indices, True)
+        mod1_reconstruct = self.decode(True, mu, None, None, None, None, batch_indices, True)
 
         fwd_dict = dict(
             latents=mu,

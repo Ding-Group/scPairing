@@ -391,7 +391,7 @@ class ModelName:
         self.model.eval()
         sampler = CellSampler(
             adata,
-            transformed_obsm=self.transformed_obsm,
+            transformed_obsm=self.transformed_obsm[::-1],
             batch_size=batch_size,
             sample_batch_id=self.model.need_batch,
             n_epochs=1,
@@ -399,17 +399,17 @@ class ModelName:
             shuffle=False
         )
         
-        embs = []
+        reconstructs = []
         latents = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model.pred_mod1_mod2_forward(data_dict) if mod1_to_mod2 \
                 else self.model.pred_mod2_mod1_forward(data_dict)
-            embs.append(fwd_dict['reconstruction'].detach().cpu())
+            reconstructs.append(fwd_dict['reconstruction'].detach().cpu())
             latents.append(fwd_dict['latents'].detach().cpu())
-        embs = torch.cat(embs, dim=0).numpy()
+        reconstructs = torch.cat(reconstructs, dim=0).numpy()
         latents = torch.cat(latents, dim=0).numpy()
-        return embs, latents
+        return reconstructs, latents
 
     def save(
         self,

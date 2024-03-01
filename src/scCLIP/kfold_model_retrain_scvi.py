@@ -15,8 +15,9 @@ import yaml
 from pathlib import Path
 import scipy
 import torch
+import wandb
 
-from models.scCLIP import scCLIP
+from main import ModelName
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 import scvi
 
@@ -86,6 +87,8 @@ def reconstruct_mod2(pvi_model):
 
 
 def main(config, seed=0):
+    wandb.init(project="kfold-retrain-model", config=config)
+
     files = config['files']
     model_params = config['model_params']
     trainer_params = config['trainer_params']
@@ -100,36 +103,8 @@ def main(config, seed=0):
 
     del mod1_adata.uns, mod1_adata.obsp, mod2_adata.uns, mod2_adata.obsp
 
-    with open('/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/10x_bmmc_full_rna/embs.pkl', 'rb') as f:
-        mod1_adata.obsm['X_scVI'] = pickle.load(f)
-
     # mod1_adata = mod1_adata[:, mod1_adata.var.highly_variable].copy()
     sc.pp.filter_genes(mod2_adata, min_cells=int(mod2_adata.shape[0] * 0.01))
-
-    if use_pretrained_decoder:
-        scvi_model = scvi.model.SCVI.load(
-            '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/10x_bmmc_full_rna/',
-            # '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/10x_bmmc/',
-            adata=mod1_adata,
-            prefix='scvi_'
-        )
-        pvi_model = scvi.model.PEAKVI.load(
-            '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/10x_bmmc',
-            adata=mod2_adata,
-            prefix='pvi'
-        )
-
-    if trainer_params.get('transformed_obsm', None):
-        if isinstance(trainer_params['transformed_obsm'], str):
-            trainer_params['transformed_obsm'] = [trainer_params['transformed_obsm'], trainer_params['transformed_obsm']]
-        mod1_input = mod1_adata.obsm[trainer_params['transformed_obsm'][0]].shape[1]
-        mod2_input = mod2_adata.obsm[trainer_params['transformed_obsm'][1]].shape[1]
-    else:
-        mod1_input = mod1_adata.n_vars
-        mod2_input = mod2_adata.n_vars
-
-        sc.pp.scale(mod1_adata, max_value=10)
-        sc.pp.scale(mod2_adata, max_value=10)
 
     kf_data = KFold(n_splits=4, shuffle=True, random_state=0)
 
@@ -137,86 +112,81 @@ def main(config, seed=0):
         mod1_train, mod1_test = mod1_adata[train_index].copy(), mod1_adata[test_index].copy()
         mod2_train, mod2_test = mod2_adata[train_index].copy(), mod2_adata[test_index].copy()
         gc.collect()
+        
+        if use_pretrained_decoder:
+            scvi_model = scvi.model.SCVI.load(
+                '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/kfold/',
+                # '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/10x_bmmc/',
+                adata=mod1_train,
+                prefix=f'scvi_fold{i}_'
+            )
+            pvi_model = scvi.model.PEAKVI.load(
+                '/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/kfold',
+                adata=mod2_train,
+                prefix=f'pvi_fold{i}_'
+            )
 
-        model = scCLIP(
-            mod1_input,  # n_mod1_input
-            mod2_input,  # n_mod2_input
-            mod1_adata.n_vars,  # n_mod1_var
-            mod2_adata.n_vars,  # n_mod2_var
-            n_batches=mod1_adata.obs[batch_col].nunique(),
-            mod2_type=model_params.get('mod2_type', 'atac'),
-            emb_dim=model_params['emb_dim'],
-            reconstruct_mod1_fn=reconstruct_mod1(scvi_model) if use_pretrained_decoder else None,
-            reconstruct_mod2_fn=reconstruct_mod2(pvi_model) if use_pretrained_decoder else None,
-            encoder_hidden_dims=model_params['hidden_dims'],
-            decoder_hidden_dims=model_params['hidden_dims'],
-            variational=model_params.get('variational', False),
-            use_decoder=model_params['use_decoder'],
-            use_norm=model_params.get('norm', 'batch'),
+        with open(f'/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/kfold/scvi_embs_fold{i}.pkl', 'rb') as f:
+            mod1_train.obsm['X_scVI'] = pickle.load(f)
+        with open(f'/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/scVI/kfold/pvi_embs_fold{i}.pkl', 'rb') as f:
+            mod2_train.obsm['X_PeakVI'] = pickle.load(f)
+
+        mod1_test.obsm['X_scVI'] = scvi_model.get_latent_representation(mod1_test)
+        mod2_test.obsm['X_PeakVI'] = pvi_model.get_latent_representation(mod2_test)
+
+        model = ModelName(
+            mod1_train,  # n_mod1_input
+            mod2_train,  # n_mod2_input
+            "rna", "atac",
+            batch_col=batch_col,
+            transformed_obsm=trainer_params.get('transformed_obsm', None),
+            counts_layer=trainer_params.get('counts_layer', None),
+            use_decoder=model_params.get('use_decoder', False),
+            emb_dim=model_params.get('emb_dim', 10),
+            encoder_hidden_dims=model_params.get('hidden_dims', (128,)),
+            decoder_hidden_dims=model_params.get('hidden_dims', (128)),
+            seed=seed,
+            variational=model_params.get('variational', True),
             combine_method=model_params.get('decode_method', 'dropout'),
             modality_discriminative=model_params.get('modality_discriminative', False),
             batch_discriminative=model_params.get('batch_discriminative', False),
             batch_dispersion=model_params.get('batch_dispersion', False),
             distance_loss=model_params.get('distance_loss', False),
             loss_method=model_params.get('loss_method', 'clip'),
-            tau=model_params.get('tau', 0.1),
-            downsample_clip=model_params.get('downsample_clip', False),
-            downsample_clip_prob=model_params.get('downsample_clip_prob', 0.5),
             set_temperature=model_params.get('set_temperature', None),
             cap_temperature=model_params.get('cap_temperature', None),
-            seed=seed
+            reconstruct_mod1_fn=reconstruct_mod1(scvi_model),
+            reconstruct_mod2_fn=reconstruct_mod2(pvi_model)
         )
 
-        trainer = UnsupervisedTrainer(
-            model,
-            mod1_train,
-            mod2_train,
-            counts_layer=trainer_params.get('counts_layer', None),
-            transformed_obsm=trainer_params.get('transformed_obsm', None),
-            weight_decay=trainer_params.get('weight_decay', 0),
-            ckpt_dir=config['ckpt_dir'],
-            batch_size=trainer_params['batch_size'],
+        model.train(
+            epochs=trainer_params.get('n_epochs', 300),
+            batch_size=trainer_params.get('batch_size', 5000),
+            ckpt_dir=config['ckpt_dir']
         )
 
-        sc._settings.ScanpyConfig.figdir = Path(trainer.ckpt_dir)
+        sc._settings.ScanpyConfig.figdir = Path(model.trainer.ckpt_dir)
 
-        with open(os.path.join(trainer.ckpt_dir, 'params.txt'), 'w') as f:
-            f.write(str(config))
+        train_latents = model.get_latent_representation()
+        mod1_train.obsm['mod1_features'] = mod2_train.obsm['mod1_features'] = train_latents[0]
+        mod1_train.obsm['mod2_features'] = mod2_train.obsm['mod2_features'] = train_latents[1]
 
-        trainer.train(
-            n_epochs=trainer_params['n_epochs'],
-            eval_every=trainer_params['eval_every'],
-            batch_col=batch_col,
-            need_reconstruction=not use_pretrained_decoder,
-            ping_every=trainer_params.get('ping_every', None),
-            eval_kwargs=dict(cell_type_col=config['cell_type_col']),
-            n_samplers=1,
-            save_model_ckpt=True,
-            eval=False
-        )
+        mod1_train.obsm['mod1_reconstruct'], _ = model.get_normalized_expression()
+        mod1_train.obsm['mod1_cross'], _ = model.get_cross_modality_expression(mod2_train, mod1_to_mod2=False)
 
-        emb_names = ['mod1_features', 'mod2_features']
-        if model_params.get('use_decoder', False) and config.get('reconstruct', False):
-            emb_names += ['mod1_reconstruct']
-        nll = model.get_cell_embeddings_and_nll(
-            mod1_train, mod2_train, emb_names=emb_names,
-            counts_layer=trainer_params.get('counts_layer', None),
-            transformed_obsm=trainer_params.get('transformed_obsm', None),
-            batch_size=1000, inplace=True
-        )
-        nll = model.get_cell_embeddings_and_nll(
-            mod1_test, mod2_test, emb_names=emb_names,
-            counts_layer=trainer_params.get('counts_layer', None),
-            transformed_obsm=trainer_params.get('transformed_obsm', None),
-            batch_size=1000, inplace=True
-        )
+        test_latents = model.get_latent_representation(mod1_test, mod2_test)
+        mod1_test.obsm['mod1_features'] = mod2_test.obsm['mod1_features'] = test_latents[0]
+        mod1_test.obsm['mod2_features'] = mod2_test.obsm['mod2_features'] = test_latents[1]
+
+        mod1_test.obsm['mod1_reconstruct'], _ = model.get_normalized_expression(mod1_test, mod2_test)
+        mod1_test.obsm['mod1_cross'], _ = model.get_cross_modality_expression(mod2_test, mod1_to_mod2=False)
 
         save = {
             'mod1_features': mod1_train.obsm['mod1_features'],
             'mod2_features': mod1_train.obsm['mod2_features'],
             'mod1_reconstruct': mod1_train.obsm['mod1_reconstruct']
         }
-        with open(os.path.join(trainer.ckpt_dir, 'train_embs.pkl'), 'wb') as f:
+        with open(os.path.join(model.trainer.ckpt_dir, 'train_embs.pkl'), 'wb') as f:
             pickle.dump(save, f)
 
         save = {
@@ -224,55 +194,57 @@ def main(config, seed=0):
             'mod2_features': mod1_test.obsm['mod2_features'],
             'mod1_reconstruct': mod1_test.obsm['mod1_reconstruct']
         }
-        with open(os.path.join(trainer.ckpt_dir, 'test_embs.pkl'), 'wb') as f:
+        with open(os.path.join(model.trainer.ckpt_dir, 'test_embs.pkl'), 'wb') as f:
             pickle.dump(save, f)
 
         # KNN evaluation
-        with open(os.path.join(trainer.ckpt_dir, f'knn_{i}.txt'), 'w') as f:
-            for n in [5, 17, 29, 41, 53, 65]:
-                train_X = np.concatenate((mod1_train.obsm['mod1_features'], mod1_train.obsm['mod2_features']), axis=1)
-                train_y = mod1_train.obs[config['cell_type_col']]
-                test_X = np.concatenate((mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features']), axis=1)
-                test_y = mod1_test.obs[config['cell_type_col']]
-                neigh = KNeighborsClassifier(n_neighbors=n)
-                neigh.fit(train_X, train_y)
+        for n in [5, 17, 29, 41, 53, 65]:
+            train_X = np.concatenate((mod1_train.obsm['mod1_features'], mod1_train.obsm['mod2_features']), axis=1)
+            train_y = mod1_train.obs[config['cell_type_col']]
+            test_X = np.concatenate((mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features']), axis=1)
+            test_y = mod1_test.obs[config['cell_type_col']]
+            neigh = KNeighborsClassifier(n_neighbors=n)
+            neigh.fit(train_X, train_y)
 
-                pred_y = neigh.predict(test_X)
-                accuracy = np.sum(pred_y == test_y) / len(test_y)
-                f.write(f'n={n}, Average={accuracy}\n')
-        
+            pred_y = neigh.predict(test_X)
+            accuracy = np.sum(pred_y == test_y) / len(test_y)
+            wandb.run.summary[f'Fold {i} Regular {n}-nn Average'] = accuracy
+
+        del train_X, test_X, pred_y
         gc.collect()
         # Assess reconstructions
-        with open(os.path.join(trainer.ckpt_dir, f'reconstructions_{i}.txt'), 'w') as f:
-            # counts_layer = trainer_params.get('counts_layer', None)
-            # if isinstance(counts_layer, list):
-            #     mod1_raw, mod2_raw = counts_layer[0], counts_layer[1]
-            # else:
-            #     mod1_raw = mod2_raw = counts_layer
-            # if mod1_raw is not None:
-            #     f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-            #     f.write(f'Pearson correlation: {correlation_score(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-            # else:
-            #     f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-            #     f.write(f'Pearson correlation: {correlation_score(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-            # gc.collect()
+        counts_layer = trainer_params.get('counts_layer', None)
+        if isinstance(counts_layer, list):
+            mod1_raw, _ = counts_layer[0], counts_layer[1]
+        else:
+            mod1_raw = counts_layer
+        if mod1_raw is not None:
+            # f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
+            wandb.run.summary[f'Fold {i} Pearson correlation'] = correlation_score(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])
+        gc.collect()
+        # else:
+        #     f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
+        #     f.write(f'Pearson correlation: {correlation_score(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
+        # gc.collect()
 
-            # lls = []
-            # for j in range(mod2_test.shape[0]):
-            #     if mod2_raw is not None:
-            #         x = mod2_test.layers[mod2_raw][j].toarray().flatten()
-            #     else:
-            #         x = mod2_test.X[j].toarray().flatten()
-            #     y = mod2_test.obsm['mod2_reconstruct'][j]
-            #     l = log_loss(x, y)
-            #     lls.append(l)
-            # f.write(f'ATAC BCE: {np.array(lls).mean()}\n')
-            # gc.collect()
+        # lls = []
+        # for j in range(mod2_test.shape[0]):
+        #     if mod2_raw is not None:
+        #         x = mod2_test.layers[mod2_raw][j].toarray().flatten()
+        #     else:
+        #         x = mod2_test.X[j].toarray().flatten()
+        #     y = mod2_test.obsm['mod2_reconstruct'][j]
+        #     l = log_loss(x, y)
+        #     lls.append(l)
+        # f.write(f'ATAC BCE: {np.array(lls).mean()}\n')
+        # gc.collect()
 
-            # FOSCTTM
-            res1 = foscttm(mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features'])
-            res2 = foscttm(mod1_test.obsm['mod2_features'], mod1_test.obsm['mod1_features'])
-            f.write(f'FOSCTTM: {res1.mean()}, {res2.mean()}\n')
+        # FOSCTTM
+        res1 = foscttm(mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features'])
+        res2 = foscttm(mod1_test.obsm['mod2_features'], mod1_test.obsm['mod1_features'])
+        wandb.run.summary[f'Fold {i} FOSCTTM 1'] = res1.mean()
+        wandb.run.summary[f'Fold {i} FOSCTTM 2'] = res2.mean()
+
         gc.collect()
 
         # new_rna = ad.AnnData(mod1_test.obsm['mod1_reconstruct'].copy(), mod1_test.obs, mod1_test.var)
@@ -312,7 +284,7 @@ def main(config, seed=0):
         # del concat
         # gc.collect()
 
-        del mod1_train, mod1_test, mod2_train, mod2_test
+        del mod1_train, mod1_test, mod2_train, mod2_test, save
         gc.collect()
 
 
