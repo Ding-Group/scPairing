@@ -10,11 +10,11 @@ model_params:
   use_decoder: True
   norm: batch
   decode_method: dropout
-  modality_discriminative: False
+  modality_discriminative: True
   batch_discriminative: True
   batch_dispersion: True
   variational: True
-  distance_loss: False
+  distance_loss: True
   loss_method: clip
 trainer_params:
   n_epochs: 300
