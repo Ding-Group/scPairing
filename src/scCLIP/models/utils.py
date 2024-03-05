@@ -67,7 +67,7 @@ class ConcentrationEncoder(nn.Module):
             dropout_prob=dropout_prob
         )
         if mod3_input_dim:
-            self.mod2_encoder = get_fully_connected_layers(
+            self.mod3_encoder = get_fully_connected_layers(
                 mod3_input_dim,
                 intermediate_dim,
                 (32,),
@@ -84,9 +84,17 @@ class ConcentrationEncoder(nn.Module):
 
     def forward(
         self,
-        *inputs: List[torch.Tensor]
+        mod1_input: torch.Tensor,
+        mod2_input: torch.Tensor,
+        mod3_input: Optional[torch.Tensor]
     ) -> None:
         """Compute the forward pass
         """
-        x = torch.concat(inputs, dim=1)
+        n1 = self.mod1_encoder(mod1_input)
+        n2 = self.mod2_encoder(mod2_input)
+        if mod3_input is None:
+            x = torch.concat([n1, n2], dim=1)
+        else:
+            n3 = self.mod3_encoder(mod3_input)
+            x = torch.concat([n1, n2, n3], dim=1)
         return nn.Softplus()(self.final(x))

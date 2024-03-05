@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union, Literal
 import logging
 import os
 
@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import random
 
-from models.model import scCLIP, Modalities
+from models.trimodel import triCLIP, Modalities, ModalityNumber
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 from batch_sampler import CellSampler
 
@@ -44,6 +44,8 @@ class ModelName:
         AnnData object corresponding to the first modality of a multimodal single-cell dataset
     adata2
         AnnData object corresponding to the second modality of a multimodal single-cell dataset
+    adata3
+        AnnData object corresponding to the third modality of a multimodal single-cell dataset
     mod1_type
         The modality type of adata1. One of the following:
 
@@ -52,6 +54,8 @@ class ModelName:
         * ``'protein'`` for epitope data modeled with a negative binomial distribution
         * ``'other'`` for other data modalities modeled with a Gaussian distribution
     mod2_type
+        The modality type of adata2. The options are identical to mod1_type.
+    mod3_type
         The modality type of adata2. The options are identical to mod1_type.
     batch_col
         Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information
@@ -88,8 +92,10 @@ class ModelName:
         self,
         adata1: AnnData,
         adata2: AnnData,
+        adata3: AnnData,
         mod1_type: Modalities = 'rna',
         mod2_type: Modalities = 'atac',
+        mod3_type: Modalities = 'protein',
         batch_col: Optional[str] = None,
         transformed_obsm: Union[str, List[str]] = 'X_pca',
         counts_layer: Optional[Union[str, List[str]]] = None,
@@ -99,25 +105,27 @@ class ModelName:
         decoder_hidden_dims: Sequence[int] = (128,),
         reconstruct_mod1_fn: Optional[Callable] = None,
         reconstruct_mod2_fn: Optional[Callable] = None,
+        reconstruct_mod3_fn: Optional[Callable] = None,
         seed: Optional[int] = None,
         **model_kwargs
     ) -> None:
-        if adata1.n_obs != adata2.n_obs:
-            raise ValueError("The two AnnData objects have different numbers of cells.")
+        if adata1.n_obs != adata2.n_obs or adata1.n_obs != adata3.n_obs:
+            raise ValueError("The AnnData objects have different numbers of cells.")
 
         self.seed = seed
         if seed:
             set_seed(seed)
 
         if isinstance(transformed_obsm, str):
-            transformed_obsm = [transformed_obsm, transformed_obsm]
+            transformed_obsm = [transformed_obsm, transformed_obsm, transformed_obsm]
         if isinstance(counts_layer, str) or counts_layer is None:
-            counts_layer = [counts_layer, counts_layer]
+            counts_layer = [counts_layer, counts_layer, counts_layer]
         self.transformed_obsm = transformed_obsm
         self.counts_layer = counts_layer
 
         mod1_input_dim = adata1.obsm[transformed_obsm[0]].shape[1] if transformed_obsm[0] is not None else adata1.X.shape[1]
         mod2_input_dim = adata2.obsm[transformed_obsm[1]].shape[1] if transformed_obsm[1] is not None else adata2.X.shape[1]
+        mod3_input_dim = adata3.obsm[transformed_obsm[2]].shape[1] if transformed_obsm[2] is not None else adata3.X.shape[1]
 
         if batch_col is not None and (batch_col not in adata1.obs_keys() or batch_col not in adata2.obs_keys()):
             raise ValueError("batch_col was not found in adata1.obs or adata2.obs")
@@ -128,20 +136,25 @@ class ModelName:
 
         self.adata1 = adata1
         self.adata2 = adata2
-        self.model = scCLIP(
+        self.adata3 = adata3
+        self.model = triCLIP(
             mod1_input_dim,
             mod2_input_dim,
+            mod3_input_dim,
             adata1.n_vars,
             adata2.n_vars,
+            adata3.n_vars,
             n_batches=n_batches,
             mod1_type=mod1_type,
             mod2_type=mod2_type,
+            mod3_type=mod3_type,
             use_decoder=use_decoder,
             emb_dim=emb_dim,
             encoder_hidden_dims=encoder_hidden_dims,
             decoder_hidden_dims=decoder_hidden_dims,
             reconstruct_mod1_fn=reconstruct_mod1_fn,
             reconstruct_mod2_fn=reconstruct_mod2_fn,
+            reconstruct_mod3_fn=reconstruct_mod3_fn,
             **model_kwargs
         )
 
@@ -167,13 +180,14 @@ class ModelName:
             Keyword arguments for UnsupervisedTrainer
         """
         need_reconstruction: bool = self.model.use_decoder and \
-            (self.model.reconstruct_mod2_fn is None or self.model.reconstruct_mod1_fn is None)
+            (self.model.reconstruct_mod2_fn is None or self.model.reconstruct_mod1_fn is None or self.model.reconstruct_mod3_fn is None)
 
         if self.trainer is None or restart_training:
             self.trainer: UnsupervisedTrainer = UnsupervisedTrainer(
                 self.model,
                 self.adata1,
                 self.adata2,
+                self.adata3,
                 counts_layer=self.counts_layer,
                 transformed_obsm=self.transformed_obsm,
                 batch_size=batch_size,
@@ -190,7 +204,8 @@ class ModelName:
     def get_latent_representation(
         self,
         adata1: Optional[AnnData] = None,
-        adata2: Optional[AnnData]= None,
+        adata2: Optional[AnnData] = None,
+        adata3: Optional[AnnData] = None,
         batch_size: int = 2000,
     ) -> Tuple[np.array]:
         """Returns the embeddings for both modalities.
@@ -198,10 +213,13 @@ class ModelName:
         Parameters
         ----------
         adata1
-            AnnData object corresponding to one modality of a multimodal single-cell dataset.
+            AnnData object corresponding to first modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         adata2
-            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
+            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+            If not provided, the AnnData provided on initialization will be used.
+        adata3
+            AnnData object corresponding to the third modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         batch_size
             Minibatch size.
@@ -209,8 +227,9 @@ class ModelName:
         self.model.eval()
         adata1 = self.adata1 if adata1 is None else adata1
         adata2 = self.adata2 if adata2 is None else adata2
+        adata3 = self.adata3 if adata3 is None else adata3
         sampler = CellSampler(
-            adata1, adata2,
+            adata1, adata2, adata3,
             require_counts=self.model.use_decoder,
             counts_layer=self.counts_layer,
             transformed_obsm=self.transformed_obsm,
@@ -223,20 +242,24 @@ class ModelName:
 
         mod1_features = []
         mod2_features = []
+        mod3_features = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
             mod1_features.append(fwd_dict['mod1_features'].detach().cpu())
             mod2_features.append(fwd_dict['mod2_features'].detach().cpu())
+            mod3_features.append(fwd_dict['mod3_features'].detach().cpu())
         
         mod1_features = torch.cat(mod1_features, dim=0).numpy()
         mod2_features = torch.cat(mod2_features, dim=0).numpy()
-        return mod1_features, mod2_features
+        mod3_features = torch.cat(mod3_features, dim=0).numpy()
+        return mod1_features, mod2_features, mod3_features
 
     def get_normalized_expression(
         self,
         adata1: Optional[AnnData] = None,
         adata2: Optional[AnnData] = None,
+        adata3: Optional[AnnData] = None,
         batch_size: int = 2000
     ) -> Tuple[np.array]:
         """Returns the reconstructed counts for both modalities.
@@ -244,15 +267,19 @@ class ModelName:
         Parameters
         ----------
         adata1
-            AnnData object corresponding to one modality of a multimodal single-cell dataset.
+            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         adata2
-            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
+            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+            If not provided, the AnnData provided on initialization will be used.
+        adata3
+            AnnData object corresponding to the third modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         batch_size
             Minibatch size.
         """
-        if not self.model.use_decoder and (self.model.reconstruct_mod1_fn is None or self.model.reconstruct_mod2_fn is None):
+        if not self.model.use_decoder and \
+            (self.model.reconstruct_mod1_fn is None or self.model.reconstruct_mod2_fn is None or self.model.reconstruct_mod3_fn is None):
             raise ValueError(
                 "Cannot compute reconstructed data when decoder is disabled " 
                 "and custom reconstruction functions are not provided."
@@ -262,8 +289,9 @@ class ModelName:
 
         adata1 = self.adata1 if adata1 is None else adata1
         adata2 = self.adata2 if adata2 is None else adata2
+        adata3 = self.adata3 if adata3 is None else adata3
         sampler = CellSampler(
-            adata1, adata2,
+            adata1, adata2, adata3,
             require_counts=self.model.use_decoder,
             counts_layer=self.counts_layer,
             transformed_obsm=self.transformed_obsm,
@@ -276,20 +304,24 @@ class ModelName:
 
         mod1_reconstruct = []
         mod2_reconstruct = []
+        mod3_reconstruct = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
             mod1_reconstruct.append(fwd_dict['mod1_reconstruct'].detach().cpu())
             mod2_reconstruct.append(fwd_dict['mod2_reconstruct'].detach().cpu())
+            mod3_reconstruct.append(fwd_dict['mod3_reconstruct'].detach().cpu())
         
         mod1_reconstruct = torch.cat(mod1_reconstruct, dim=0).numpy()
         mod2_reconstruct = torch.cat(mod2_reconstruct, dim=0).numpy()
-        return mod1_reconstruct, mod2_reconstruct
+        mod3_reconstruct = torch.cat(mod3_reconstruct, dim=0).numpy()
+        return mod1_reconstruct, mod2_reconstruct, mod3_reconstruct
     
     def get_likelihoods(
         self,
         adata1: Optional[AnnData] = None,
         adata2: Optional[AnnData] = None,
+        adata3: Optional[AnnData] = None,
         include_mse: bool = True,
         batch_size: int = 2000
     ) -> Tuple[np.array]:
@@ -298,10 +330,13 @@ class ModelName:
         Parameters
         ----------
         adata1
-            AnnData object corresponding to one modality of a multimodal single-cell dataset.
+            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         adata2
-            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
+            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+            If not provided, the AnnData provided on initialization will be used.
+        adata3
+            AnnData object corresponding to the third modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
         TODO: Does include_mse make sense?
         batch_size
@@ -312,7 +347,8 @@ class ModelName:
                 "The model has the full decoder disabled. "
                 "The full reconstruction losses will be all zero."
             )
-        if not include_mse and (self.model.reconstruct_mod1_fn is not None or self.model.reconstruct_mod2_fn is not None):
+        if not include_mse and \
+            (self.model.reconstruct_mod1_fn is not None or self.model.reconstruct_mod2_fn is not None or self.model.reconstruct_mod3_fn is not None):
             _logger.warning(
                 "The model has custom reconstruction functions. "
                 "The full reconstruction losses will be all zero."
@@ -321,8 +357,9 @@ class ModelName:
 
         adata1 = self.adata1 if adata1 is None else adata1
         adata2 = self.adata2 if adata2 is None else adata2
+        adata3 = self.adata3 if adata3 is None else adata3
         sampler = CellSampler(
-            adata1, adata2,
+            adata1, adata2, adata3,
             require_counts=self.model.use_decoder,
             counts_layer=self.counts_layer,
             transformed_obsm=self.transformed_obsm,
@@ -335,62 +372,85 @@ class ModelName:
 
         mod1_nll = torch.zeros([])
         mod2_nll = torch.zeros([])
+        mod3_nll = torch.zeros([])
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
             if include_mse:
-                mod1_nll += fwd_dict['nb']
-                mod2_nll += fwd_dict['bernoulli']
+                mod1_nll += fwd_dict['loss1']
+                mod2_nll += fwd_dict['loss2']
+                mod3_nll += fwd_dict['loss3']
             mod1_nll += fwd_dict['mod1_reconstruct_loss']
             mod2_nll += fwd_dict['mod2_reconstruct_loss']
-        return mod1_nll.detach().numpy(), mod2_nll.detach().numpy()
+            mod3_nll += fwd_dict['mod3_reconstruct_loss']
+        return mod1_nll.detach().numpy(), mod2_nll.detach().numpy(), mod3_nll.detach().numpy()
 
     def get_cross_modality_expression(
         self,
-        mod1_to_mod2: bool,
+        from_modality: ModalityNumber,
+        to_modality: ModalityNumber,
         adata: Optional[AnnData] = None,
         batch_size: int = 2000,
     ) -> np.array:
         """
-        Predict the expression of the other modality given the representation
+        Predict the expression of the another modality given the representation
         of one modality.
 
         Parameters
         ----------
-        mod1_to_mod2
-            Whether to compute the cross modality prediction from the first modality
-            to the second modality.
+        from_modality
+            Which modality to use as prediction input. One of:
+            
+            * ``'mod1'`` for the first modality
+            * ``'mod2'`` for the second modality
+            * ``'mod3'`` for the third modality
+        to_modality
+            Which modality whose expression will be predicted. Options are the
+            same as ``from_modality``.
         adata
             AnnData object corresponding to one of the modalities in a multimodal
-            dataset. If adata is None and ``mod1_to_mod2`` is ``True``, then ``adata1``
-            will be used. If adata is None and ``mod1_to_mod2`` is ``False``, then
-            ``adata2`` will be used.
+            dataset. If adata is None, use the AnnData object corresponding to the
+            ``from_modality``.
         batch_size
             Minibatch size.
         """
         if not self.model.use_decoder:
-            if mod1_to_mod2 and self.model.reconstruct_mod2_fn is None:
+            if to_modality == 'mod2' and self.model.reconstruct_mod2_fn is None:
                 _logger.warning(
                     "The model has no decoder and no custom reconstruction function "
                     f"for the second modality. The reconstructed {self.transformed_obsm[1]} "
                     "will be returned."
                 )
-            elif not mod1_to_mod2 and self.model.reconstruct_mod1_fn is None:
+            elif to_modality == 'mod1' and self.model.reconstruct_mod1_fn is None:
                 _logger.warning(
                     "The model has no decoder and no custom reconstruction function "
                     f"for the first modality. The reconstructed {self.transformed_obsm[0]} "
                     "will be returned."
                 )
+            elif to_modality == 'mod3' and self.model.reconstruct_mod3_fn is None:
+                _logger.warning(
+                    "The model has no decoder and no custom reconstruction function "
+                    f"for the third modality. The reconstructed {self.transformed_obsm[2]} "
+                    "will be returned."
+                )
 
-        if mod1_to_mod2 and adata is None:
-            adata = self.adata1
-        elif not mod1_to_mod2 and adata is None:
-            adata = self.adata2
+        if from_modality == 'mod1':
+            if adata is None:
+                adata = self.adata1
+            transformed_obsm = self.transformed_obsm[0]
+        elif from_modality == 'mod2':
+            if adata is None:
+                adata = self.adata2
+            transformed_obsm = self.transformed_obsm[1]
+        elif from_modality == 'mod3':
+            if adata is None:
+                adata = self.adata3
+            transformed_obsm = self.transformed_obsm[2]
 
         self.model.eval()
         sampler = CellSampler(
             adata,
-            transformed_obsm=self.transformed_obsm[::-1],
+            transformed_obsm=transformed_obsm,
             batch_size=batch_size,
             sample_batch_id=self.model.need_batch,
             n_epochs=1,
@@ -402,8 +462,7 @@ class ModelName:
         latents = []
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
-            fwd_dict = self.model.pred_mod1_mod2_forward(data_dict) if mod1_to_mod2 \
-                else self.model.pred_mod2_mod1_forward(data_dict)
+            fwd_dict = self.model.intermodality_prediction(data_dict, from_modality, to_modality)
             reconstructs.append(fwd_dict['reconstruction'].detach().cpu())
             latents.append(fwd_dict['latents'].detach().cpu())
         reconstructs = torch.cat(reconstructs, dim=0).numpy()

@@ -3,7 +3,7 @@ from enum import Enum
 import math
 import logging
 
-import anndata
+from anndata import AnnData
 import numpy as np
 import torch
 import torch.nn as nn
@@ -19,13 +19,13 @@ from .utils import get_fully_connected_layers, ConcentrationEncoder
 Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']
 Combine = Literal['dropout', 'average']
-ModalityNumber = Enum('ModalityNumber', ['FIRST', 'SECOND', 'THIRD'])
+ModalityNumber = Literal['mod1', 'mod2', 'mod3']
 
 
 _logger = logging.getLogger(__name__)
 
 
-class scCLIP(nn.Module):
+class triCLIP(nn.Module):
     """Variational autoencoder model
 
     Parameters
@@ -34,10 +34,14 @@ class scCLIP(nn.Module):
         Input dimension of the low-dimensional representations for the first data modality.
     mod2_input_dim
         Input dimension of the low-dimensional representations for the second data modality.
+    mod3_input_dim
+        Input dimension of the low-dimensional representations for the third data modality.
     mod1_var_dim
         Dimension of the count features for the first data modality.
     mod2_var_dim
         Dimension of the count features for the second data modality.
+    mod3_var_dim
+        Dimension of the count features for the third data modality.
     n_batches
         Number of batches present in the dataset
     mod1_type
@@ -49,6 +53,8 @@ class scCLIP(nn.Module):
         * ``'other'`` for other data modalities modeled with a Gaussian distribution
     mod2_type
         The modality type of adata2. The options are identical to mod1_type.
+    mod3_type
+        The modality type of adata3. The options are identical to mod1_type.
     use_decoder
         Whether to train a decoder to reconstruct the counts on top of the low-dimension representations.
     emb_dim
@@ -225,8 +231,7 @@ class scCLIP(nn.Module):
                 nn.Linear(self.emb_dim, 128),
                 nn.LayerNorm(128),
                 nn.ELU(),
-                nn.Linear(128, 1),
-                nn.Sigmoid()  # Directly predict binary
+                nn.Linear(128, 3)  # Directly predict binary
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
         self.batch_discriminative: bool = batch_discriminative
@@ -355,7 +360,7 @@ class scCLIP(nn.Module):
         Parameters
         ----------
         decode_modality
-            Which modality to decode: one of 1, 2, 3.
+            Which modality to decode.
         features
             Embeddings on the common hyperspherical latent space.
         mod1_embs
@@ -372,12 +377,12 @@ class scCLIP(nn.Module):
             Whether the model is decoding cells with known low-dimension representations
             and raw counts, or is imputing unseen data.
         """
-        if decode_modality == ModalityNumber.FIRST:
+        if decode_modality == 'mod1':
             decoder = self.mod1_decoder
-        elif decode_modality == ModalityNumber.SECOND:
-            decoder, name = self.mod2_decoder, 'mod2'
-        elif decode_modality == ModalityNumber.THIRD:
-            decoder, name = self.mod3_decoder, 'mod3'
+        elif decode_modality == 'mod2':
+            decoder = self.mod2_decoder
+        elif decode_modality == 'mod3':
+            decoder = self.mod3_decoder
 
         approx_features = decoder(features)
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
@@ -387,11 +392,11 @@ class scCLIP(nn.Module):
                 'reconstruction_loss': torch.zeros([]),
                 'nll': loss
             }
-        if decode_modality == ModalityNumber.FIRST:
+        if decode_modality == 'mod1':
             reconstruct_fn, reconstructor, mod_type, n_output = self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim
-        elif decode_modality == ModalityNumber.SECOND:
+        elif decode_modality == 'mod2':
             reconstruct_fn, reconstructor, mod_type, n_output = self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim
-        elif decode_modality == ModalityNumber.THIRD:
+        elif decode_modality == 'mod3':
             reconstruct_fn, reconstructor, mod_type, n_output = self.reconstruct_mod3_fn, self.mod3_reconstructor, self.mod3_type, self.mod3_output_dim
         if reconstruct_fn is None:
             if self.n_batches > 1:
@@ -401,11 +406,11 @@ class scCLIP(nn.Module):
                 approx_features = torch.cat([approx_features, batch_one_hot], axis=1)
             approx_features = reconstructor(approx_features)
             if mod_type == 'rna':
-                if decode_modality == ModalityNumber.FIRST:
+                if decode_modality == 'mod1':
                     dispersion = self.mod1_dispersion
-                elif decode_modality == ModalityNumber.SECOND:
+                elif decode_modality == 'mod2':
                     dispersion = self.mod2_dispersion
-                elif decode_modality == ModalityNumber.THIRD:
+                elif decode_modality == 'mod3':
                     dispersion = self.mod3_dispersion
                 if is_imputation:
                     library_size = torch.ones([])
@@ -512,9 +517,9 @@ class scCLIP(nn.Module):
         else:
             z = combined_features
 
-        mod1_dict = self.decode(ModalityNumber.FIRST, z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
-        mod2_dict = self.decode(ModalityNumber.SECOND, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
-        mod3_dict = self.decode(ModalityNumber.THIRD, z, mod3_input, counts_3, library_size_3, cell_indices, batch_indices)
+        mod1_dict = self.decode('mod1', z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
+        mod2_dict = self.decode('mod2', z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
+        mod3_dict = self.decode('mod3', z, mod3_input, counts_3, library_size_3, cell_indices, batch_indices)
 
         log_px_zl = mod1_dict['nll'] + mod2_dict['nll'] + mod3_dict['nll']
         loss1 = mod1_dict['nll']
@@ -574,7 +579,7 @@ class scCLIP(nn.Module):
                 2 * torch.ones(mod3_features.shape[0], device=self.device)]
             ).to(torch.long)  # [0, ..., 0, 1, ..., 1, 2, ..., 2]
             discriminative_loss = self.ce_loss(torch.cat([mod1_preds, mod2_preds, mod3_preds]).squeeze(-1), truth.squeeze(-1))
-            fwd_dict['discriminative'] = discriminative_loss
+            fwd_dict['modality_discriminative'] = discriminative_loss
 
             loss = loss - discriminative_loss
 
@@ -590,8 +595,8 @@ class scCLIP(nn.Module):
 
         if self.distance_loss and self.training:
             dist_loss = self.cosine_loss(mod1_features, mod2_features).mean() + \
-                self.cosine_loss(mod1_features, mod3_features) + \
-                self.cosine_loss(mod2_features, mod3_features)
+                self.cosine_loss(mod1_features, mod3_features).mean() + \
+                self.cosine_loss(mod2_features, mod3_features).mean()
             # Want to encourage them to be similar
             loss = loss - dist_loss
 
@@ -619,6 +624,7 @@ class scCLIP(nn.Module):
             record['dist'] = fwd_dict['dist']
         if self.loss_method == 'sigmoid':
             record['bias'] = fwd_dict['bias']
+
         record = {k: v.detach().item() for k, v in record.items()}
         return loss, fwd_dict, record
 
@@ -711,9 +717,9 @@ class scCLIP(nn.Module):
 
     def get_cell_embeddings_and_nll(
         self,
-        adata1: anndata.AnnData,
-        adata2: anndata.AnnData,
-        adata3: anndata.AnnData,
+        adata1: AnnData,
+        adata2: AnnData,
+        adata3: AnnData,
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
@@ -767,9 +773,9 @@ class scCLIP(nn.Module):
             return embs, nll
 
     def _apply_to(self,
-        adata1: anndata.AnnData,
-        adata2: anndata.AnnData,
-        adata3: anndata.AnnData,
+        adata1: AnnData,
+        adata2: AnnData,
+        adata3: AnnData,
         batch_col: str = 'batch_indices',
         batch_size: int = 2000,
         counts_layer=None,
@@ -806,11 +812,11 @@ class scCLIP(nn.Module):
         mod_input = data_dict["cells_1_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
 
-        if from_modality == ModalityNumber.FIRST:
+        if from_modality == 'mod1':
             encoder = self.mod1_encoder
-        elif from_modality == ModalityNumber.SECOND:
+        elif from_modality == 'mod2':
             encoder = self.mod2_encoder
-        elif from_modality == ModalityNumber.THIRD:
+        elif from_modality == 'mod3':
             encoder = self.mod3_encoder
         
         features = encoder(mod_input)

@@ -1,6 +1,6 @@
-from scCLIP import main, batch_sampler
+from scCLIP import main, batch_sampler, trimain
 from scCLIP.logging_utils import initialize_logger
-from scCLIP.models import model
+from scCLIP.models import model, trimodel
 from scCLIP.trainers import UnsupervisedTrainer
 from train_model import main
 from kfold_model import main
