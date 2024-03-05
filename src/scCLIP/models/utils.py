@@ -45,12 +45,13 @@ class ConcentrationEncoder(nn.Module):
         self,
         mod1_input_dim: int,
         mod2_input_dim: int,
+        mod3_input_dim: Optional[int],
         intermediate_dim: int = 5,
         norm_type: Literal['layer', 'batch', 'none'] = 'layer',
         dropout_prob: float = 0.1
     ) -> None:
         super().__init__()
-
+        n_mods = 3 if mod3_input_dim else 2
         self.mod1_encoder = get_fully_connected_layers(
             mod1_input_dim,
             intermediate_dim,
@@ -65,8 +66,16 @@ class ConcentrationEncoder(nn.Module):
             norm_type=norm_type,
             dropout_prob=dropout_prob
         )
+        if mod3_input_dim:
+            self.mod2_encoder = get_fully_connected_layers(
+                mod3_input_dim,
+                intermediate_dim,
+                (32,),
+                norm_type=norm_type,
+                dropout_prob=dropout_prob
+            )
         self.final = get_fully_connected_layers(
-            intermediate_dim * 2,
+            intermediate_dim * n_mods,
             1,
             (32,),
             norm_type=norm_type,
@@ -75,10 +84,9 @@ class ConcentrationEncoder(nn.Module):
 
     def forward(
         self,
-        mod1_input: torch.Tensor,
-        mod2_input: torch.Tensor
+        *inputs: List[torch.Tensor]
     ) -> None:
         """Compute the forward pass
         """
-        x = torch.concat([self.mod1_encoder(mod1_input), self.mod2_encoder(mod2_input)], dim=1)
+        x = torch.concat(inputs, dim=1)
         return nn.Softplus()(self.final(x))
