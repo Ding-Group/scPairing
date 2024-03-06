@@ -504,6 +504,10 @@ class triCLIP(nn.Module):
         mod2_features = self.mod2_encoder(mod2_input)
         mod3_features = self.mod3_encoder(mod3_input)
 
+        mod1_features = F.normalize(mod1_features)
+        mod2_features = F.normalize(mod2_features)
+        mod3_features = F.normalize(mod3_features)
+
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone(), mod3_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
         if self.variational:
