@@ -45,7 +45,7 @@ class ConcentrationEncoder(nn.Module):
         self,
         mod1_input_dim: int,
         mod2_input_dim: int,
-        mod3_input_dim: Optional[int],
+        mod3_input_dim: Optional[int] = None,
         intermediate_dim: int = 5,
         norm_type: Literal['layer', 'batch', 'none'] = 'layer',
         dropout_prob: float = 0.1
@@ -86,7 +86,7 @@ class ConcentrationEncoder(nn.Module):
         self,
         mod1_input: torch.Tensor,
         mod2_input: torch.Tensor,
-        mod3_input: Optional[torch.Tensor]
+        mod3_input: Optional[torch.Tensor] = None
     ) -> None:
         """Compute the forward pass
         """

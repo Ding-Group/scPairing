@@ -345,9 +345,10 @@ class scCLIP(nn.Module):
             if decode_mod1 else (self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim)
         if reconstruct_fn is None:
             if self.n_batches > 1:
-                batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
                 if is_imputation:
-                    batch_one_hot = torch.zeros(features.shape[0], self.n_batches)
+                    batch_one_hot = torch.zeros((features.shape[0], self.n_batches), device=self.device)
+                else:
+                    batch_one_hot = F.one_hot(batch_indices, num_classes=self.n_batches)
                 approx_features = torch.cat([approx_features, batch_one_hot], axis=1)
             approx_features = reconstructor(approx_features)
             if mod_type == 'rna':

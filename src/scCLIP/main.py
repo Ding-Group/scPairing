@@ -387,10 +387,12 @@ class ModelName:
         elif not mod1_to_mod2 and adata is None:
             adata = self.adata2
 
+        transformed_obsm = self.transformed_obsm[0] if mod1_to_mod2 else self.transformed_obsm[1]
+
         self.model.eval()
         sampler = CellSampler(
             adata,
-            transformed_obsm=self.transformed_obsm[::-1],
+            transformed_obsm=transformed_obsm,
             batch_size=batch_size,
             sample_batch_id=self.model.need_batch,
             n_epochs=1,
