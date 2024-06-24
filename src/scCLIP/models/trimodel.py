@@ -388,6 +388,7 @@ class triCLIP(nn.Module):
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
         if not self.use_decoder:
             return {
+                'approx_features': approx_features,
                 'reconstruction': torch.zeros([]),
                 'reconstruction_loss': torch.zeros([]),
                 'nll': loss
@@ -445,6 +446,7 @@ class triCLIP(nn.Module):
             )
             reconstruction_loss = torch.zeros([])
         return {
+            'approx_features': approx_features,
             'reconstruction': reconstruct,
             'reconstruction_loss': reconstruction_loss,
             'nll': loss
