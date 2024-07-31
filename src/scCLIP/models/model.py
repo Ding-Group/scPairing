@@ -1,29 +1,46 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Optional, Callable, Literal, List
-import math
+import logging
+from typing import (
+    Any,
+    Callable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
+
 import anndata
 import numpy as np
-import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
 from batch_sampler import CellSampler
-from .log_likelihood import log_nb_positive
+
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
+from .log_likelihood import log_nb_positive
 from .losses import ClipLoss, DebiasedClipLoss, SigmoidLoss
-from .utils import get_fully_connected_layers, ConcentrationEncoder
+from .utils import (
+    ConcentrationEncoder,
+    HypersphericalUniform,
+    get_fully_connected_layers,
+)
 
 Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']
 Combine = Literal['dropout', 'average']
 
+MOD1_EMB = 'mod1_features'
+MOD2_EMB = 'mod2_features'
+
 
 _logger = logging.getLogger(__name__)
 
 
-class scCLIP(nn.Module):
-    """Variational autoencoder model
+class Model(nn.Module):
+    """Cross-modal variational autoencoder model
 
     Parameters
     ----------
@@ -66,8 +83,6 @@ class scCLIP(nn.Module):
         * ``'clip'`` - contrastive loss from `Learning Transferable Visual Models From Natural Language Supervision` (Radford `et al.`, 2021)
         * ``'debiased_clip'`` - debiased contrastive loss from `Debiased Contrastive Learning` (Chuang `et al.`, 2020)
         * ``'sigmoid'`` - sigmoid loss from `Sigmoid Loss for Language Image Pre-Training` (Zhai `et al.`, 2023)
-    variational
-        Whether the model should be a VAE or AE.
     combine_method
         Method for merging representations from the two encoders. One of the following:
 
@@ -91,7 +106,9 @@ class scCLIP(nn.Module):
     batch_discriminative
         Whether to adversarially train a discriminator that aims to
         predict which batch a particular embedding came from.
-    distance_loss
+    discriminator_hidden_dims
+        Number of nodes and depth of the discriminator(s)
+    cosine_loss
         Whether to subtract the cosine similarity between the two modality embeddings
         into the total loss.
     set_temperature
@@ -101,7 +118,7 @@ class scCLIP(nn.Module):
         Maximum temperature the CLIP loss can reach during training. If None, the
         temperature is unbounded.
     """
-    emb_names: Sequence[str] = ['mod1_features', 'mod2_features']
+    emb_names: Sequence[str] = [MOD1_EMB, MOD2_EMB]
 
     def __init__(
         self,
@@ -119,7 +136,6 @@ class scCLIP(nn.Module):
         reconstruct_mod1_fn: Optional[Callable] = None,
         reconstruct_mod2_fn: Optional[Callable] = None,
         loss_method: Loss = 'clip',
-        variational: bool = True,
         combine_method: Combine = "dropout",
         batch_dispersion: bool = False,
         use_norm: Literal['layer', 'batch', 'none'] = 'batch',
@@ -127,7 +143,8 @@ class scCLIP(nn.Module):
         modality_discriminative: bool = True,
         batch_discriminative: bool = False,
         batch_discriminative_weight: float = 1,
-        distance_loss: bool = True,
+        discriminator_hidden_dims: Sequence[int] = (128,),
+        cosine_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -200,33 +217,34 @@ class scCLIP(nn.Module):
             self.logit_scale: nn.Parameter = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.modality_discriminative: bool = modality_discriminative
+        self.discriminator_hidden_dims: Sequence[int] = discriminator_hidden_dims
         if self.modality_discriminative:
-            self.discriminator: nn.Module = nn.Sequential(
-                nn.Linear(self.emb_dim, 128),
-                nn.LayerNorm(128),
-                nn.ELU(),
-                nn.Linear(128, 1),
-                nn.Sigmoid()  # Directly predict binary
+            self.modality_discriminator: nn.Module = nn.Sequential(
+                get_fully_connected_layers(
+                    self.emb_dim, 1,
+                    self.discriminator_hidden_dims,
+                    norm_type=self.norm,
+                    dropout_prob=self.dropout
+                ),
+                nn.Sigmoid()  # Directly predict binary modality
             )
             self.bce_loss: nn.Module = nn.BCELoss()
         self.batch_discriminative: bool = batch_discriminative
         self.batch_discriminative_weight: float = batch_discriminative_weight
         if self.batch_discriminative:
-            self.batch_discriminator = nn.Sequential(
-                nn.Linear(self.emb_dim, 128),
-                nn.LayerNorm(128),
-                nn.ELU(),
-                nn.Linear(128, self.n_batches)
+            self.batch_discriminator: nn.Module = get_fully_connected_layers(
+                self.emb_dim, self.n_batches,
+                self.discriminator_hidden_dims,
+                norm_type=self.norm,
+                dropout_prob=self.dropout
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
 
-        self.distance_loss: bool = distance_loss
-        if self.distance_loss:
+        self.cosine_loss: bool = cosine_loss
+        if self.cosine_loss:
             self.cosine_loss: nn.Module = nn.CosineSimilarity()
 
-        self.variational: bool = variational
-        if variational:
-            self.emb_indices: torch.Tensor = torch.arange(self.emb_dim, dtype=torch.float) + 1
+        self.emb_indices: torch.Tensor = torch.arange(self.emb_dim, dtype=torch.float) + 1
 
         self.loss_method: Loss = loss_method
         if loss_method == 'clip':
@@ -250,19 +268,16 @@ class scCLIP(nn.Module):
         self.to(device)
 
     def _init_decoders(self):
-        """Initialize the decoders
-        """
+        """Initialize the decoders"""
         self.mod1_decoder: nn.Module = get_fully_connected_layers(
-            self.emb_dim,
-            self.mod1_input_dim,
-            (128, ),  # TODO: Make this a hyperparameter
+            self.emb_dim, self.mod1_input_dim,
+            self.decoder_hidden_dims,
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
         self.mod2_decoder: nn.Module = get_fully_connected_layers(
-            self.emb_dim,
-            self.mod2_input_dim,
-            (128, ),  # TODO: Make this a hyperparameter
+            self.emb_dim, self.mod2_input_dim,
+            self.decoder_hidden_dims,
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
@@ -444,23 +459,17 @@ class scCLIP(nn.Module):
 
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-        if self.variational:
-            var = self.var_encoder(mod1_input, mod2_input) + 1e-5  # (batch_size,)
+        var = self.var_encoder(mod1_input, mod2_input) + 1e-5  # (batch_size,)
 
-            z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
-            if self.training:
-                z = z_dist.rsample()
-            else:
-                z = combined_features
+        z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
+        if self.training:
+            z = z_dist.rsample()
         else:
             z = combined_features
 
-        if self.variational:
-            mod1_dict = self.decode(True, z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
-            mod2_dict = self.decode(False, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
-        else:
-            mod1_dict = self.decode(True, mod2_features, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
-            mod2_dict = self.decode(False, mod1_features, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
+        mod1_dict = self.decode(True, z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
+        mod2_dict = self.decode(False, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
+
         log_px_zl = mod1_dict['nll'] + mod2_dict['nll']
         nb = mod1_dict['nll']
         bernoulli = mod2_dict['nll']
@@ -470,8 +479,8 @@ class scCLIP(nn.Module):
             logit_scale = torch.clamp(logit_scale, max=self.cap_temperature)
 
         fwd_dict = {
-            "mod1_features": mod1_features,
-            "mod2_features": mod2_features,
+            MOD1_EMB: mod1_features,
+            MOD2_EMB: mod2_features,
             "temp": logit_scale.mean(),
             "nll": log_px_zl.mean(),
             "mod1_reconstruct_loss": mod1_dict["reconstruction_loss"],
@@ -480,7 +489,7 @@ class scCLIP(nn.Module):
             "bernoulli": bernoulli
         }
         
-        if self.variational and self.use_decoder:
+        if self.use_decoder:
             fwd_dict['combined_features'] = z
         if self.use_decoder:
             fwd_dict['mod1_reconstruct'] = mod1_dict['reconstruction']
@@ -501,8 +510,8 @@ class scCLIP(nn.Module):
         loss = log_px_zl + contrastive_loss
 
         if self.modality_discriminative and self.training:
-            mod1_preds = self.discriminator(mod1_features)
-            mod2_preds = self.discriminator(mod2_features)
+            mod1_preds = self.modality_discriminator(mod1_features)
+            mod2_preds = self.modality_discriminator(mod2_features)
             truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
             discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
             fwd_dict['modality_discriminative'] = discriminative_loss
@@ -518,22 +527,17 @@ class scCLIP(nn.Module):
 
             loss = loss - batch_loss * hyper_param_dict.get('batch_weight', 1)
 
-        if self.distance_loss and self.training:
+        if self.cosine_loss and self.training:
             dist_loss = self.cosine_loss(mod1_features, mod2_features).mean()
             # Want to encourage them to be similar
             loss = loss - dist_loss
 
             fwd_dict['dist'] = dist_loss
 
-        if self.variational:
-            uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
-            kl = _kl_powerspherical_uniform(z_dist, uni)
-            # ps = PowerSpherical(mu, var.squeeze(-1))
-            # kl = _kl_powerspherical_uniform(mod1_z_dist, uni) + _kl_powerspherical_uniform(mod2_z_dist, uni)
-            fwd_dict['KL'] = kl.mean()
-            loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
-        else:
-            fwd_dict['KL'] = torch.zeros([])
+        uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
+        kl = _kl_powerspherical_uniform(z_dist, uni)
+        fwd_dict['KL'] = kl.mean()
+        loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
 
         record = dict(
             loss=loss,
@@ -547,7 +551,7 @@ class scCLIP(nn.Module):
             record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
             record['batch_discriminative'] = fwd_dict['batch_discriminative']
-        if self.distance_loss and self.training:
+        if self.cosine_loss and self.training:
             record['dist'] = fwd_dict['dist']
         if self.loss_method == 'sigmoid':
             record['bias'] = fwd_dict['bias']
@@ -577,8 +581,8 @@ class scCLIP(nn.Module):
 
         discriminative_loss = 0
         if self.modality_discriminative:
-            mod1_preds = self.discriminator(mod1_features)
-            mod2_preds = self.discriminator(mod2_features)
+            mod1_preds = self.modality_discriminator(mod1_features)
+            mod2_preds = self.modality_discriminator(mod2_features)
             truth = torch.cat([torch.zeros(mod1_features.shape[0], device=self.device), torch.ones(mod2_features.shape[0], device=self.device)])
             discriminative_loss = discriminative_loss + self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
 
@@ -636,7 +640,6 @@ class scCLIP(nn.Module):
         adata1: anndata.AnnData,
         adata2: anndata.AnnData,
         batch_size: int = 2000,
-        emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
         counts_layer=None,
         transformed_obsm=None,
@@ -650,17 +653,13 @@ class scCLIP(nn.Module):
         nlls = []
         if not self.use_decoder:
             nlls = None
-        if emb_names is None:
-            emb_names = self.emb_names
         self.eval()
-        if isinstance(emb_names, str):
-            emb_names = [emb_names]
 
-        embs = {name: [] for name in emb_names}
+        embs = {name: [] for name in self.emb_names}
         hyper_param_dict = dict(decode=nlls is not None)
 
         def store_emb_and_nll(data_dict, fwd_dict):
-            for name in emb_names:
+            for name in self.emb_names:
                 embs[name].append(fwd_dict[name].detach().cpu())
             if nlls is not None:
                 nlls.append(fwd_dict['nll'].detach().item())
@@ -673,7 +672,7 @@ class scCLIP(nn.Module):
             callback=store_emb_and_nll
         )
 
-        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in emb_names}
+        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in self.emb_names}
         if nlls is not None:
             nll = sum(nlls) / adata1.n_obs
         else:
@@ -752,56 +751,3 @@ class scCLIP(nn.Module):
         if not self.use_decoder:
             return dict(latents=mu, reconstruction=mod1_reconstruct['approx_features'])
         return dict(latents=mu, reconstruction=mod1_reconstruct['reconstruction'])
-
-
-class HypersphericalUniform(torch.distributions.Distribution):
-
-    support = torch.distributions.constraints.real
-    has_rsample = False
-    _mean_carrier_measure = 0
-
-    @property
-    def dim(self):
-        return self._dim
-
-    @property
-    def device(self):
-        return self._device
-
-    @device.setter
-    def device(self, val):
-        self._device = val if isinstance(val, torch.device) else torch.device(val)
-
-    def __init__(self, dim, validate_args=None, device="cpu"):
-        super(HypersphericalUniform, self).__init__(
-            torch.Size([dim]), validate_args=validate_args
-        )
-        self._dim = dim
-        self.device = device
-
-    def sample(self, shape=torch.Size()):
-        output = (
-            torch.distributions.Normal(0, 1)
-            .sample(
-                (shape if isinstance(shape, torch.Size) else torch.Size([shape]))
-                + torch.Size([self._dim + 1])
-            )
-            .to(self.device)
-        )
-
-        return output / output.norm(dim=-1, keepdim=True)
-
-    def entropy(self):
-        return self.__log_surface_area()
-
-    def log_prob(self, x):
-        return -torch.ones(x.shape[:-1], device=self.device) * self.__log_surface_area()
-
-    def __log_surface_area(self):
-        if torch.__version__ >= "1.0.0":
-            lgamma = torch.lgamma(torch.tensor([(self._dim + 1) / 2]).to(self.device))
-        else:
-            lgamma = torch.lgamma(
-                torch.Tensor([(self._dim + 1) / 2], device=self.device)
-            )
-        return math.log(2) + ((self._dim + 1) / 2) * math.log(math.pi) - lgamma

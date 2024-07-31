@@ -86,9 +86,8 @@ def foscttm(x: np.ndarray, y: np.ndarray, split=10000, **kwargs):
 #     return f
 
 
-def main(config: dict, seed=0):
-    # config.update({'version': 'flipped'})
-    wandb.init(project="kfold-model-seed-by-fold", config=config)
+def main(config, seed=0):
+    wandb.init(project="learned-decoder-imputation", config={'seed': seed})
 
     files = config['files']
     model_params = config['model_params']
@@ -101,14 +100,6 @@ def main(config: dict, seed=0):
     mod1_files, mod2_files = files['mod1'], files['mod2']
     mod1_adata = ad.concat([ad.read_h5ad(f) for f in mod1_files], label="batch_indices", merge='same')
     mod2_adata = ad.concat([ad.read_h5ad(f) for f in mod2_files], label="batch_indices", merge='same')
-
-    # Forgot to add
-    mod1_adata.obsm['X_pca'] = mod1_adata.obsm['X_pca'][:, :20]
-    mod2_adata.obsm['X_lsi'] = mod2_adata.obsm['X_lsi'][:, :20]
-
-    # New CellPLM
-    with open('/scratch/st-jiaruid-1/yinian/my_jupyter/scCLIP/results/benchmarking/cellplm/new_embs.pkl', 'rb') as f:
-        mod1_adata.obsm['X_cellplm'] = pickle.load(f)
 
     del mod1_adata.uns, mod1_adata.obsp, mod2_adata.uns, mod2_adata.obsp
 
@@ -131,11 +122,11 @@ def main(config: dict, seed=0):
     #         prefix='pvi'
     #     )
 
-    kf_data = KFold(n_splits=4, shuffle=True, random_state=seed)
+    kf_data = KFold(n_splits=4, shuffle=True, random_state=0)
 
     for i, (train_index, test_index) in enumerate(kf_data.split(mod1_adata)):
-        mod1_train, mod1_test = mod1_adata[test_index].copy(), mod1_adata[train_index].copy()
-        mod2_train, mod2_test = mod2_adata[test_index].copy(), mod2_adata[train_index].copy()
+        mod1_train, mod1_test = mod1_adata[train_index].copy(), mod1_adata[test_index].copy()
+        mod2_train, mod2_test = mod2_adata[train_index].copy(), mod2_adata[test_index].copy()
         gc.collect()
 
         model = scPairing(
@@ -145,11 +136,11 @@ def main(config: dict, seed=0):
             batch_col=batch_col,
             transformed_obsm=trainer_params.get('transformed_obsm', None),
             counts_layer=trainer_params.get('counts_layer', None),
-            use_decoder=model_params.get('use_decoder', False),
+            use_decoder=True,
             emb_dim=model_params.get('emb_dim', 10),
             encoder_hidden_dims=model_params.get('hidden_dims', (128,)),
             decoder_hidden_dims=model_params.get('hidden_dims', (128)),
-            seed=0,
+            seed=seed,
             variational=model_params.get('variational', True),
             combine_method=model_params.get('decode_method', 'dropout'),
             modality_discriminative=model_params.get('modality_discriminative', False),
@@ -158,9 +149,7 @@ def main(config: dict, seed=0):
             distance_loss=model_params.get('distance_loss', False),
             loss_method=model_params.get('loss_method', 'clip'),
             set_temperature=model_params.get('set_temperature', None),
-            cap_temperature=model_params.get('cap_temperature', None),
-            # reconstruct_mod1_fn=reconstruct_mod1(scvi_model),
-            # reconstruct_mod2_fn=reconstruct_mod2(pvi_model)
+            cap_temperature=model_params.get('cap_temperature', None)
         )
 
         model.train(
@@ -184,7 +173,7 @@ def main(config: dict, seed=0):
         mod1_test.obsm['mod2_features'] = mod2_test.obsm['mod2_features'] = test_latents[1]
 
         # mod1_test.obsm['mod1_reconstruct'], _ = model.get_normalized_expression(mod1_test, mod2_test)
-        # mod1_test.obsm['mod1_cross'], _ = model.get_cross_modality_expression(mod2_test, mod1_to_mod2=False)
+        mod1_test.obsm['mod1_cross'], _ = model.get_cross_modality_expression(False, mod2_test)
 
         # save = {
         #     'mod1_features': mod1_train.obsm['mod1_features'],
@@ -203,32 +192,33 @@ def main(config: dict, seed=0):
         #     pickle.dump(save, f)
 
         # KNN evaluation
-        for n in [5, 17, 29, 41, 53, 65]:
-            train_X = np.concatenate((mod1_train.obsm['mod1_features'], mod1_train.obsm['mod2_features']), axis=1)
-            train_y = mod1_train.obs[config['cell_type_col']]
-            test_X = np.concatenate((mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features']), axis=1)
-            test_y = mod1_test.obs[config['cell_type_col']]
-            neigh = KNeighborsClassifier(n_neighbors=n)
-            neigh.fit(train_X, train_y)
+        # for n in [5, 17, 29, 41, 53, 65]:
+        #     train_X = np.concatenate((mod1_train.obsm['mod1_features'], mod1_train.obsm['mod2_features']), axis=1)
+        #     train_y = mod1_train.obs[config['cell_type_col']]
+        #     test_X = np.concatenate((mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features']), axis=1)
+        #     test_y = mod1_test.obs[config['cell_type_col']]
+        #     neigh = KNeighborsClassifier(n_neighbors=n)
+        #     neigh.fit(train_X, train_y)
 
-            pred_y = neigh.predict(test_X)
-            accuracy = np.sum(pred_y == test_y) / len(test_y)
-            wandb.run.summary[f'Fold {i} Regular {n}-nn Average'] = accuracy
+        #     pred_y = neigh.predict(test_X)
+        #     accuracy = np.sum(pred_y == test_y) / len(test_y)
+        #     wandb.run.summary[f'Fold {i} Regular {n}-nn Average'] = accuracy
         
         gc.collect()
         # Assess reconstructions
-        # counts_layer = trainer_params.get('counts_layer', None)
-        # if isinstance(counts_layer, list):
-        #     mod1_raw, _ = counts_layer[0], counts_layer[1]
-        # else:
-        #     mod1_raw = counts_layer
+        counts_layer = trainer_params.get('counts_layer', None)
+        if isinstance(counts_layer, list):
+            mod1_raw, _ = counts_layer[0], counts_layer[1]
+        else:
+            mod1_raw = counts_layer
         # if mod1_raw is not None:
-        #     # f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-        #     wandb.run.summary[f'Fold {i} Pearson correlation'] = correlation_score(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])
+            # f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
+        wandb.run.summary[f'RNA Imputation'] = correlation_score(mod1_test.layers[mod1_raw].toarray(), mod1_test.obsm["mod1_cross"])
         # else:
         #     f.write(f'Mean-squared log error: {mean_squared_log_error(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-        #     f.write(f'Pearson correlation: {correlation_score(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
-        # gc.collect()
+            # f.write(f'Pearson correlation: {correlation_score(mod1_test.X.toarray(), mod1_test.obsm["mod1_reconstruct"])}\n')
+        break
+        gc.collect()
 
         # lls = []
         # for j in range(mod2_test.shape[0]):
@@ -243,10 +233,10 @@ def main(config: dict, seed=0):
         # gc.collect()
 
         # FOSCTTM
-        res1 = foscttm(mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features'])
-        res2 = foscttm(mod1_test.obsm['mod2_features'], mod1_test.obsm['mod1_features'])
-        wandb.run.summary[f'Fold {i} FOSCTTM 1'] = res1.mean()
-        wandb.run.summary[f'Fold {i} FOSCTTM 2'] = res2.mean()
+        # res1 = foscttm(mod1_test.obsm['mod1_features'], mod1_test.obsm['mod2_features'])
+        # res2 = foscttm(mod1_test.obsm['mod2_features'], mod1_test.obsm['mod1_features'])
+        # wandb.run.summary[f'Fold {i} FOSCTTM 1'] = res1.mean()
+        # wandb.run.summary[f'Fold {i} FOSCTTM 2'] = res2.mean()
 
         gc.collect()
 

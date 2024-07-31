@@ -66,7 +66,7 @@ class UnsupervisedTrainer:
 
     @log_arguments
     def __init__(self,
-        model: model.scCLIP,
+        model: model.Model,
         adata1: anndata.AnnData,
         adata2: anndata.AnnData,
         adata3: Optional[anndata.AnnData] = None,

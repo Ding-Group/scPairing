@@ -17,7 +17,7 @@ import scipy
 import torch
 import wandb
 
-from main import ModelName
+from main import scPairing
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 import scvi
 
@@ -134,7 +134,7 @@ def main(config, seed=0):
         mod1_test.obsm['X_scVI'] = scvi_model.get_latent_representation(mod1_test)
         mod2_test.obsm['X_PeakVI'] = pvi_model.get_latent_representation(mod2_test)
 
-        model = ModelName(
+        model = scPairing(
             mod1_train,  # n_mod1_input
             mod2_train,  # n_mod2_input
             "rna", "atac",
@@ -246,43 +246,6 @@ def main(config, seed=0):
         wandb.run.summary[f'Fold {i} FOSCTTM 2'] = res2.mean()
 
         gc.collect()
-
-        # new_rna = ad.AnnData(mod1_test.obsm['mod1_reconstruct'].copy(), mod1_test.obs, mod1_test.var)
-        # sc.pp.normalize_total(new_rna, target_sum=1e4)
-        # sc.pp.log1p(new_rna)
-        # sc.tl.pca(new_rna, svd_solver='arpack')
-        # sc.pp.neighbors(new_rna)
-        # sc.tl.umap(new_rna, min_dist=0.1)
-        # sc.pl.umap(new_rna, color=[config['cell_type_col']], save=f'rna_reconstruction_{i}.png')
-        # del new_rna
-        # gc.collect()
-
-        # # Embeddings of test data
-        # concat = np.concatenate((mod1_test.obsm['mod1_features'], mod2_test.obsm['mod2_features']), axis=1)
-        # mod1_test.obsm['concat'] = concat
-        # sc.pp.neighbors(mod1_test, use_rep='mod2_features')
-        # sc.tl.umap(mod1_test, min_dist=0.1)
-        # sc.pl.umap(mod1_test, color=config['cell_type_col'], save=f'concat_clustering_{i}.png')
-        # del mod1_test.obsm['concat']
-        # gc.collect()
-
-        # # Mixing of embeddings in test
-        # concat_feat = np.concatenate([mod1_test.obsm['mod1_features'], mod2_test.obsm['mod2_features']])
-        # concat = ad.concat([mod1_test, mod1_test], label='mod_feature')
-        # concat.obsm['concat_feat'] = concat_feat
-        # sc.pp.neighbors(concat, use_rep='concat_feat')
-        # sc.tl.umap(concat, min_dist=0.5)
-        # sc.pl.umap(concat, color=[config['cell_type_col'], 'mod_feature'], save=f'mix_test_embeddings_{i}.png')
-        # del concat, concat_feat
-        # gc.collect()
-
-        # # Mixing of train and test embeddings
-        # concat = ad.concat([mod1_train, mod1_test], label='train_test')
-        # sc.pp.neighbors(concat, use_rep='mod1_features')
-        # sc.tl.umap(concat, min_dist=0.5)
-        # sc.pl.umap(concat, color=[config['cell_type_col'], 'train_test'], save=f'mix_train_test_{i}.png')
-        # del concat
-        # gc.collect()
 
         del mod1_train, mod1_test, mod2_train, mod2_test, save
         gc.collect()

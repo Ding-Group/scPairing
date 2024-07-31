@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import random
 
-from models.trimodel import triCLIP, Modalities, ModalityNumber
+from models.trimodel import Trimodel, Modalities, ModalityNumber
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 from batch_sampler import CellSampler
 
@@ -137,7 +137,7 @@ class ModelName:
         self.adata1 = adata1
         self.adata2 = adata2
         self.adata3 = adata3
-        self.model = triCLIP(
+        self.model = Trimodel(
             mod1_input_dim,
             mod2_input_dim,
             mod3_input_dim,

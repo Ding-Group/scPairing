@@ -2,13 +2,12 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union
 import logging
 import os
 
-import anndata as ad
 from anndata import AnnData
 import numpy as np
 import torch
 import random
 
-from models.model import scCLIP, Modalities
+from models.model import Model, Modalities
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 from batch_sampler import CellSampler
 
@@ -35,7 +34,7 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-class ModelName:
+class scPairing:
     """Multimodal data integration using contrastive learning and variational inference.
 
     Parameters
@@ -128,7 +127,7 @@ class ModelName:
 
         self.adata1 = adata1
         self.adata2 = adata2
-        self.model = scCLIP(
+        self.model = Model(
             mod1_input_dim,
             mod2_input_dim,
             adata1.n_vars,

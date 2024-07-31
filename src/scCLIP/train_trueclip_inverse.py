@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import scvi
 
-from main import ModelName
+from main import scPairing
 
 
 def reconstruct_mod1(scvi_model):
@@ -74,7 +74,7 @@ def main(config, seed=0):
         prefix='pvi'
     )
 
-    model = ModelName(
+    model = scPairing(
         mod1_adata, mod2_adata,
         "rna", "atac",
         batch_col=batch_col,

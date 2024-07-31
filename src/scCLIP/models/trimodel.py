@@ -21,11 +21,14 @@ Modalities = Literal['rna', 'atac', 'protein', 'other']
 Combine = Literal['dropout', 'average']
 ModalityNumber = Literal['mod1', 'mod2', 'mod3']
 
+MOD1_EMB = 'mod1_features'
+MOD2_EMB = 'mod2_features'
+
 
 _logger = logging.getLogger(__name__)
 
 
-class triCLIP(nn.Module):
+class Trimodel(nn.Module):
     """Variational autoencoder model
 
     Parameters
@@ -75,8 +78,6 @@ class triCLIP(nn.Module):
         * ``'clip'`` - contrastive loss from `Learning Transferable Visual Models From Natural Language Supervision` (Radford `et al.`, 2021)
         * ``'debiased_clip'`` - debiased contrastive loss from `Debiased Contrastive Learning` (Chuang `et al.`, 2020)
         * ``'sigmoid'`` - sigmoid loss from `Sigmoid Loss for Language Image Pre-Training` (Zhai `et al.`, 2023)
-    variational
-        Whether the model should be a VAE or AE.
     combine_method
         Method for merging representations from the two encoders. One of the following:
 
@@ -100,7 +101,9 @@ class triCLIP(nn.Module):
     batch_discriminative
         Whether to adversarially train a discriminator that aims to
         predict which batch a particular embedding came from.
-    distance_loss
+    discriminator_hidden_dims
+        Number of nodes and depth of the discriminator(s)
+    cosine_loss
         Whether to subtract the cosine similarity between the two modality embeddings
         into the total loss.
     set_temperature
@@ -110,7 +113,7 @@ class triCLIP(nn.Module):
         Maximum temperature the CLIP loss can reach during training. If None, the
         temperature is unbounded.
     """
-    emb_names: Sequence[str] = ['mod1_features', 'mod2_features']
+    emb_names: Sequence[str] = [MOD1_EMB, MOD2_EMB]
 
     def __init__(
         self,
@@ -132,7 +135,6 @@ class triCLIP(nn.Module):
         reconstruct_mod2_fn: Optional[Callable] = None,
         reconstruct_mod3_fn: Optional[Callable] = None,
         loss_method: Loss = 'clip',
-        variational: bool = True,
         combine_method: Combine = "dropout",
         batch_dispersion: bool = False,
         use_norm: Literal['layer', 'batch', 'none'] = 'batch',
@@ -140,7 +142,8 @@ class triCLIP(nn.Module):
         modality_discriminative: bool = True,
         batch_discriminative: bool = False,
         batch_discriminative_weight: float = 1,
-        distance_loss: bool = True,
+        discriminator_hidden_dims: Sequence[int] = (128,),
+        cosine_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
         device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -226,32 +229,31 @@ class triCLIP(nn.Module):
             self.logit_scale: nn.Parameter = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.modality_discriminative: bool = modality_discriminative
+        self.discriminator_hidden_dims: Sequence[int] = discriminator_hidden_dims
         if self.modality_discriminative:
-            self.discriminator: nn.Module = nn.Sequential(
-                nn.Linear(self.emb_dim, 128),
-                nn.LayerNorm(128),
-                nn.ELU(),
-                nn.Linear(128, 3)  # Directly predict binary
+            self.modality_discriminator: nn.Module = get_fully_connected_layers(
+                self.emb_dim, 3,
+                self.discriminator_hidden_dims,
+                norm_type = self.norm,
+                dropout_prob=self.dropout
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
         self.batch_discriminative: bool = batch_discriminative
         self.batch_discriminative_weight: float = batch_discriminative_weight
         if self.batch_discriminative:
-            self.batch_discriminator = nn.Sequential(
-                nn.Linear(self.emb_dim, 128),
-                nn.LayerNorm(128),
-                nn.ELU(),
-                nn.Linear(128, self.n_batches)
+            self.batch_discriminator = get_fully_connected_layers(
+                self.emb_dim, self.n_batches,
+                self.discriminator_hidden_dims,
+                norm_type=self.norm,
+                dropout_prob=self.dropout
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
 
-        self.distance_loss: bool = distance_loss
-        if self.distance_loss:
+        self.cosine_loss: bool = cosine_loss
+        if self.cosine_loss:
             self.cosine_loss: nn.Module = nn.CosineSimilarity()
 
-        self.variational: bool = variational
-        if variational:
-            self.emb_indices: torch.Tensor = torch.arange(self.emb_dim, dtype=torch.float) + 1
+        self.emb_indices: torch.Tensor = torch.arange(self.emb_dim, dtype=torch.float) + 1
 
         self.loss_method: Loss = loss_method
         if loss_method == 'clip':
@@ -276,8 +278,7 @@ class triCLIP(nn.Module):
         self.to(device)
 
     def _init_decoders(self):
-        """Initialize the decoders
-        """
+        """Initialize the decoders"""
         self.mod1_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod1_input_dim,
@@ -406,7 +407,7 @@ class triCLIP(nn.Module):
                     batch_one_hot = torch.zeros(features.shape[0], self.n_batches)
                 approx_features = torch.cat([approx_features, batch_one_hot], axis=1)
             approx_features = reconstructor(approx_features)
-            if mod_type == 'rna':
+            if mod_type == 'rna' or mod_type == 'protein':
                 if decode_modality == 'mod1':
                     dispersion = self.mod1_dispersion
                 elif decode_modality == 'mod2':
@@ -512,14 +513,11 @@ class triCLIP(nn.Module):
 
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone(), mod3_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-        if self.variational:
-            var = self.var_encoder(mod1_input, mod2_input, mod3_input) + 1e-5  # (batch_size,)
+        var = self.var_encoder(mod1_input, mod2_input, mod3_input) + 1e-5  # (batch_size,)
 
-            z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
-            if self.training:
-                z = z_dist.rsample()
-            else:
-                z = combined_features
+        z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
+        if self.training:
+            z = z_dist.rsample()
         else:
             z = combined_features
 
@@ -550,7 +548,7 @@ class triCLIP(nn.Module):
             "loss3": loss3
         }
         
-        if self.variational and self.use_decoder:
+        if self.use_decoder:
             fwd_dict['combined_features'] = z
         if self.use_decoder:
             fwd_dict['mod1_reconstruct'] = mod1_dict['reconstruction']
@@ -576,9 +574,9 @@ class triCLIP(nn.Module):
         loss = log_px_zl + contrastive_loss
 
         if self.modality_discriminative and self.training:
-            mod1_preds = self.discriminator(mod1_features)
-            mod2_preds = self.discriminator(mod2_features)
-            mod3_preds = self.discriminator(mod3_features)
+            mod1_preds = self.modality_discriminator(mod1_features)
+            mod2_preds = self.modality_discriminator(mod2_features)
+            mod3_preds = self.modality_discriminator(mod3_features)
             truth = torch.cat([
                 torch.zeros(mod1_features.shape[0], device=self.device),
                 torch.ones(mod2_features.shape[0], device=self.device),
@@ -599,7 +597,7 @@ class triCLIP(nn.Module):
 
             loss = loss - batch_loss * hyper_param_dict.get('batch_weight', 1)
 
-        if self.distance_loss and self.training:
+        if self.cosine_loss and self.training:
             dist_loss = self.cosine_loss(mod1_features, mod2_features).mean() + \
                 self.cosine_loss(mod1_features, mod3_features).mean() + \
                 self.cosine_loss(mod2_features, mod3_features).mean()
@@ -626,7 +624,7 @@ class triCLIP(nn.Module):
             record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
             record['batch_discriminative'] = fwd_dict['batch_discriminative']
-        if self.distance_loss and self.training:
+        if self.cosine_loss and self.training:
             record['dist'] = fwd_dict['dist']
         if self.loss_method == 'sigmoid':
             record['bias'] = fwd_dict['bias']
@@ -661,9 +659,9 @@ class triCLIP(nn.Module):
 
         discriminative_loss = 0
         if self.modality_discriminative:
-            mod1_preds = self.discriminator(mod1_features)
-            mod2_preds = self.discriminator(mod2_features)
-            mod3_preds = self.discriminator(mod3_features)
+            mod1_preds = self.modality_discriminator(mod1_features)
+            mod2_preds = self.modality_discriminator(mod2_features)
+            mod3_preds = self.modality_discriminator(mod3_features)
             truth = torch.cat([
                 torch.zeros(mod1_features.shape[0], device=self.device),
                 torch.ones(mod2_features.shape[0], device=self.device),
@@ -727,7 +725,6 @@ class triCLIP(nn.Module):
         adata2: AnnData,
         adata3: AnnData,
         batch_size: int = 2000,
-        emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
         counts_layer=None,
         transformed_obsm=None,
@@ -741,17 +738,13 @@ class triCLIP(nn.Module):
         nlls = []
         if not self.use_decoder:
             nlls = None
-        if emb_names is None:
-            emb_names = self.emb_names
         self.eval()
-        if isinstance(emb_names, str):
-            emb_names = [emb_names]
 
-        embs = {name: [] for name in emb_names}
+        embs = {name: [] for name in self.emb_names}
         hyper_param_dict = dict(decode=nlls is not None)
 
         def store_emb_and_nll(data_dict, fwd_dict):
-            for name in emb_names:
+            for name in self.emb_names:
                 embs[name].append(fwd_dict[name].detach().cpu())
             if nlls is not None:
                 nlls.append(fwd_dict['nll'].detach().item())
@@ -764,7 +757,7 @@ class triCLIP(nn.Module):
             callback=store_emb_and_nll
         )
 
-        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in emb_names}
+        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in self.emb_names}
         if nlls is not None:
             nll = sum(nlls) / adata1.n_obs
         else:
