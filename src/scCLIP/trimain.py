@@ -1,41 +1,19 @@
-from typing import Callable, List, Optional, Sequence, Tuple, Union, Literal
 import logging
 import os
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
-import anndata as ad
-from anndata import AnnData
 import numpy as np
 import torch
-import random
-
-from models.trimodel import Trimodel, Modalities, ModalityNumber
-from trainers.UnsupervisedTrainer import UnsupervisedTrainer
+from anndata import AnnData
 from batch_sampler import CellSampler
-
+from models.trimodel import Modalities, ModalityNumber, Trimodel
+from models.utils import set_seed
+from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 _logger = logging.getLogger(__name__)
 
 
-def set_seed(seed: int) -> None:
-    """Sets the random seed to seed.
-    Borrowed from https://gist.github.com/Guitaricet/28fbb2a753b1bb888ef0b2731c03c031
-
-    Parameters
-    ----------
-    seed
-        The random seed.
-    """
-    random.seed(seed)     # python random generator
-    np.random.seed(seed)  # numpy random generator
-
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-class ModelName:
+class triscPairing:
     """Multimodal data integration using contrastive learning and variational inference.
 
     Parameters
@@ -112,7 +90,7 @@ class ModelName:
         if adata1.n_obs != adata2.n_obs or adata1.n_obs != adata3.n_obs:
             raise ValueError("The AnnData objects have different numbers of cells.")
 
-        self.seed = seed
+        self.seed: Optional[int] = seed
         if seed:
             set_seed(seed)
 
@@ -120,8 +98,8 @@ class ModelName:
             transformed_obsm = [transformed_obsm, transformed_obsm, transformed_obsm]
         if isinstance(counts_layer, str) or counts_layer is None:
             counts_layer = [counts_layer, counts_layer, counts_layer]
-        self.transformed_obsm = transformed_obsm
-        self.counts_layer = counts_layer
+        self.transformed_obsm: List[str] = transformed_obsm
+        self.counts_layer: List[Optional[str]] = counts_layer
 
         mod1_input_dim = adata1.obsm[transformed_obsm[0]].shape[1] if transformed_obsm[0] is not None else adata1.X.shape[1]
         mod2_input_dim = adata2.obsm[transformed_obsm[1]].shape[1] if transformed_obsm[1] is not None else adata2.X.shape[1]
@@ -134,10 +112,10 @@ class ModelName:
         if batch_col is not None and len(adata1.obs[batch_col].cat.categories) != len(adata2.obs[batch_col].cat.categories):
             raise ValueError("The number of batches present in adata1 and adata2 are different.")
 
-        self.adata1 = adata1
-        self.adata2 = adata2
-        self.adata3 = adata3
-        self.model = Trimodel(
+        self.adata1: AnnData = adata1
+        self.adata2: AnnData = adata2
+        self.adata3: AnnData = adata3
+        self.model: Trimodel = Trimodel(
             mod1_input_dim,
             mod2_input_dim,
             mod3_input_dim,

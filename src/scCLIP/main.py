@@ -1,37 +1,16 @@
-from typing import Callable, List, Optional, Sequence, Tuple, Union
 import logging
 import os
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
-from anndata import AnnData
 import numpy as np
 import torch
-import random
-
-from models.model import Model, Modalities
-from trainers.UnsupervisedTrainer import UnsupervisedTrainer
+from anndata import AnnData
 from batch_sampler import CellSampler
-
+from models.model import Modalities, Model
+from models.utils import set_seed
+from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 _logger = logging.getLogger(__name__)
-
-
-def set_seed(seed: int) -> None:
-    """Sets the random seed to seed.
-    Borrowed from https://gist.github.com/Guitaricet/28fbb2a753b1bb888ef0b2731c03c031
-
-    Parameters
-    ----------
-    seed
-        The random seed.
-    """
-    random.seed(seed)     # python random generator
-    np.random.seed(seed)  # numpy random generator
-
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 class scPairing:
@@ -105,7 +84,7 @@ class scPairing:
         if adata1.n_obs != adata2.n_obs:
             raise ValueError("The two AnnData objects have different numbers of cells.")
 
-        self.seed = seed
+        self.seed: Optional[int] = seed
         if seed:
             set_seed(seed)
 
@@ -113,22 +92,22 @@ class scPairing:
             transformed_obsm = [transformed_obsm, transformed_obsm]
         if isinstance(counts_layer, str) or counts_layer is None:
             counts_layer = [counts_layer, counts_layer]
-        self.transformed_obsm = transformed_obsm
-        self.counts_layer = counts_layer
+        self.transformed_obsm: List[str] = transformed_obsm
+        self.counts_layer: List[Optional[str]] = counts_layer
 
         mod1_input_dim = adata1.obsm[transformed_obsm[0]].shape[1] if transformed_obsm[0] is not None else adata1.X.shape[1]
         mod2_input_dim = adata2.obsm[transformed_obsm[1]].shape[1] if transformed_obsm[1] is not None else adata2.X.shape[1]
 
         if batch_col is not None and (batch_col not in adata1.obs_keys() or batch_col not in adata2.obs_keys()):
             raise ValueError("batch_col was not found in adata1.obs or adata2.obs")
-        self.batch_col = batch_col
+        self.batch_col: Optional[str] = batch_col
         n_batches = len(adata1.obs[batch_col].cat.categories) if batch_col is not None else 1
         if batch_col is not None and len(adata1.obs[batch_col].cat.categories) != len(adata2.obs[batch_col].cat.categories):
             raise ValueError("The number of batches present in adata1 and adata2 are different.")
 
-        self.adata1 = adata1
-        self.adata2 = adata2
-        self.model = Model(
+        self.adata1: AnnData = adata1
+        self.adata2: AnnData = adata2
+        self.model: scPairing = Model(
             mod1_input_dim,
             mod2_input_dim,
             adata1.n_vars,

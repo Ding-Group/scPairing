@@ -1,6 +1,8 @@
 import math
+import random
 from typing import Literal, Optional, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -141,3 +143,22 @@ class HypersphericalUniform(torch.distributions.Distribution):
                 torch.Tensor([(self._dim + 1) / 2], device=self.device)
             )
         return math.log(2) + ((self._dim + 1) / 2) * math.log(math.pi) - lgamma
+
+
+def set_seed(seed: int) -> None:
+    """Sets the random seed to seed.
+    Borrowed from https://gist.github.com/Guitaricet/28fbb2a753b1bb888ef0b2731c03c031
+
+    Parameters
+    ----------
+    seed
+        The random seed.
+    """
+    random.seed(seed)     # python random generator
+    np.random.seed(seed)  # numpy random generator
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
