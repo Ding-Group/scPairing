@@ -34,6 +34,18 @@ Combine = Literal['dropout', 'average']
 
 MOD1_EMB = 'mod1_features'
 MOD2_EMB = 'mod2_features'
+MOD1_LOSS = 'mod1_loss'
+MOD2_LOSS = 'mod2_loss'
+NLL = 'nll'
+CONTRASTIVE = 'contrastive'
+KL = 'KL'
+TEMP = 'temp'
+FEATURES = 'approx_features'
+RECONSTRUCTION = 'reconstruction'
+RECONSTRUCTION_LOSS = 'reconstruction_loss'
+MOD1_RECONSTRUCT_LOSS = 'mod1_reconstruction_loss'
+MOD2_RECONSTRUCT_LOSS = 'mod2_reconstruction_loss'
+EPS = 1e-5
 
 
 _logger = logging.getLogger(__name__)
@@ -136,7 +148,7 @@ class Model(nn.Module):
         reconstruct_mod1_fn: Optional[Callable] = None,
         reconstruct_mod2_fn: Optional[Callable] = None,
         loss_method: Loss = 'clip',
-        combine_method: Combine = "dropout",
+        combine_method: Combine = 'dropout',
         batch_dispersion: bool = False,
         use_norm: Literal['layer', 'batch', 'none'] = 'batch',
         dropout: float = 0.1,
@@ -147,7 +159,7 @@ class Model(nn.Module):
         cosine_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     ) -> None:
         super().__init__()
 
@@ -159,15 +171,15 @@ class Model(nn.Module):
             raise ValueError("mod1_type must be one of 'rna', 'atac', 'protein', or 'other'")
         # Validate batch choices
         if batch_dispersion and n_batches == 1:
-            _logger.warning("With one batch provided, per-batch dispersion will be disabled")
+            _logger.warning('With one batch provided, per-batch dispersion will be disabled')
             batch_dispersion = False
         if batch_discriminative and n_batches == 1:
-            _logger.warning("With one batch provided, batch adversarial loss will be disabled")
+            _logger.warning('With one batch provided, batch adversarial loss will be disabled')
             batch_discriminative = False
         # Validate decoder choices
         if (reconstruct_mod1_fn is not None or reconstruct_mod2_fn is not None) and not use_decoder:
-            _logger.warning("Reconstruction functions were provided but decoding was turned off.\n"
-                            "The provided reconstruction functions will not be used.")
+            _logger.warning('Reconstruction functions were provided but decoding was turned off.\n'
+                            'The provided reconstruction functions will not be used.')
 
         # Model parameters
         self.device: torch.device = device
@@ -351,10 +363,10 @@ class Model(nn.Module):
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
         if not self.use_decoder:
             return {
-                'approx_features': approx_features,
-                'reconstruction': torch.zeros([]),
-                'reconstruction_loss': torch.zeros([]),
-                'nll': loss
+                FEATURES: approx_features,
+                RECONSTRUCTION: torch.zeros([]),
+                RECONSTRUCTION_LOSS: torch.zeros([]),
+                NLL: loss
             }
         reconstruct_fn, reconstructor, mod_type, n_output = (self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim) \
             if decode_mod1 else (self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim)
@@ -382,7 +394,7 @@ class Model(nn.Module):
                 reconstruction_loss = F.binary_cross_entropy(
                     reconstruct,
                     counts,
-                    reduction="none"
+                    reduction='none'
                 ).sum(-1).mean() * 10 / n_output if not is_imputation else torch.zeros([])
             elif mod_type == 'other':
                 reconstruct = approx_features
@@ -401,10 +413,10 @@ class Model(nn.Module):
             )
             reconstruction_loss = torch.zeros([])
         return {
-            'approx_features': approx_features,
-            'reconstruction': reconstruct,
-            'reconstruction_loss': reconstruction_loss,
-            'nll': loss
+            FEATURES: approx_features,
+            RECONSTRUCTION: reconstruct,
+            RECONSTRUCTION_LOSS: reconstruction_loss,
+            NLL: loss
         }
 
     def combine_features(
@@ -446,20 +458,20 @@ class Model(nn.Module):
         hyper_param_dict
             Dictionary containing hyperparameters.
         """
-        counts_1, counts_2 = data_dict["cells_1"], data_dict["cells_2"]  # (batch_size, mod1_output_dim), (batch_size, mod2_output_dim)
-        library_size_1, library_size_2 = data_dict["library_size_1"], data_dict["library_size_2"]  # (batch_size,), (batch_size,)
+        counts_1, counts_2 = data_dict['cells_1'], data_dict['cells_2']  # (batch_size, mod1_output_dim), (batch_size, mod2_output_dim)
+        library_size_1, library_size_2 = data_dict['library_size_1'], data_dict['library_size_2']  # (batch_size,), (batch_size,)
         cell_indices = data_dict['cell_indices']  # (batch_size,)
         batch_indices = data_dict.get('batch_indices', None)  # (batch_size,)
 
-        mod1_input = data_dict["cells_1_transformed"] # (batch_size * mod1_input_dim)
-        mod2_input = data_dict["cells_2_transformed"] # (batch_size * mod2_input_dim)
+        mod1_input = data_dict['cells_1_transformed'] # (batch_size * mod1_input_dim)
+        mod2_input = data_dict['cells_2_transformed'] # (batch_size * mod2_input_dim)
 
         mod1_features = F.normalize(self.mod1_encoder(mod1_input))  # (batch_size * emb_dim)
         mod2_features = F.normalize(self.mod2_encoder(mod2_input))  # (batch_size * emb_dim)
 
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-        var = self.var_encoder(mod1_input, mod2_input) + 1e-5  # (batch_size,)
+        var = self.var_encoder(mod1_input, mod2_input) + EPS  # (batch_size,)
 
         z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
         if self.training:
@@ -470,9 +482,9 @@ class Model(nn.Module):
         mod1_dict = self.decode(True, z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
         mod2_dict = self.decode(False, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
 
-        log_px_zl = mod1_dict['nll'] + mod2_dict['nll']
-        nb = mod1_dict['nll']
-        bernoulli = mod2_dict['nll']
+        log_px_zl = mod1_dict[NLL] + mod2_dict[NLL]
+        nb = mod1_dict[NLL]
+        bernoulli = mod2_dict[NLL]
 
         logit_scale = self.logit_scale.exp()
         if self.cap_temperature is not None:
@@ -481,19 +493,19 @@ class Model(nn.Module):
         fwd_dict = {
             MOD1_EMB: mod1_features,
             MOD2_EMB: mod2_features,
-            "temp": logit_scale.mean(),
-            "nll": log_px_zl.mean(),
-            "mod1_reconstruct_loss": mod1_dict["reconstruction_loss"],
-            "mod2_reconstruct_loss": mod2_dict["reconstruction_loss"],
-            "nb": nb,
-            "bernoulli": bernoulli
+            TEMP: logit_scale.mean(),
+            NLL: log_px_zl.mean(),
+            MOD1_RECONSTRUCT_LOSS: mod1_dict[RECONSTRUCTION_LOSS],
+            MOD2_RECONSTRUCT_LOSS: mod2_dict[RECONSTRUCTION_LOSS],
+            MOD1_LOSS: nb,
+            MOD2_LOSS: bernoulli
         }
         
         if self.use_decoder:
             fwd_dict['combined_features'] = z
         if self.use_decoder:
-            fwd_dict['mod1_reconstruct'] = mod1_dict['reconstruction']
-            fwd_dict['mod2_reconstruct'] = mod2_dict['reconstruction']
+            fwd_dict['mod1_reconstruct'] = mod1_dict[RECONSTRUCTION]
+            fwd_dict['mod2_reconstruct'] = mod2_dict[RECONSTRUCTION]
 
         if not self.training:
             return fwd_dict
@@ -505,7 +517,7 @@ class Model(nn.Module):
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, batch_indices)
         else:
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
-        fwd_dict['contrastive'] = contrastive_loss
+        fwd_dict[CONTRASTIVE] = contrastive_loss
 
         loss = log_px_zl + contrastive_loss
 
@@ -528,25 +540,28 @@ class Model(nn.Module):
             loss = loss - batch_loss * hyper_param_dict.get('batch_weight', 1)
 
         if self.cosine_loss and self.training:
-            dist_loss = self.cosine_loss(mod1_features, mod2_features).mean()
+            cos_loss = self.cosine_loss(mod1_features, mod2_features).mean()
             # Want to encourage them to be similar
-            loss = loss - dist_loss
+            loss = loss - cos_loss
 
-            fwd_dict['dist'] = dist_loss
+            fwd_dict['dist'] = cos_loss
 
         uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
         kl = _kl_powerspherical_uniform(z_dist, uni)
-        fwd_dict['KL'] = kl.mean()
+        fwd_dict[KL] = kl.mean()
         loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
 
-        record = dict(
-            loss=loss,
-            contrastive=fwd_dict['contrastive'],
-            KL=fwd_dict['KL'],
-            nb=fwd_dict['nb'],
-            bernoulli=fwd_dict['bernoulli'],
-            temp=fwd_dict['temp'],
-        )
+        record = {
+            'loss': loss,
+            CONTRASTIVE: fwd_dict[CONTRASTIVE],
+            KL: fwd_dict[KL],
+            MOD1_LOSS: fwd_dict[MOD1_LOSS],
+            MOD2_LOSS: fwd_dict[MOD2_LOSS],
+            TEMP: fwd_dict[TEMP],
+        }
+        if self.use_decoder:
+            record[MOD1_RECONSTRUCT_LOSS] = fwd_dict[MOD1_RECONSTRUCT_LOSS]
+            record[MOD2_RECONSTRUCT_LOSS] = fwd_dict[MOD2_RECONSTRUCT_LOSS]
         if self.modality_discriminative and self.training:
             record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
@@ -568,8 +583,8 @@ class Model(nn.Module):
         """
         if not self.modality_discriminative and not self.batch_discriminative:
             return None
-        mod1_input = data_dict["cells_1_transformed"]
-        mod2_input = data_dict["cells_2_transformed"]
+        mod1_input = data_dict['cells_1_transformed']
+        mod2_input = data_dict['cells_2_transformed']
         batch_indices = data_dict.get('batch_indices', None)
 
         mod1_features = self.mod1_encoder(mod1_input)
@@ -641,14 +656,32 @@ class Model(nn.Module):
         adata2: anndata.AnnData,
         batch_size: int = 2000,
         batch_col: str = 'batch_indices',
-        counts_layer=None,
-        transformed_obsm=None,
+        counts_layer: List[Optional[str]] = [None, None],
+        transformed_obsm: List[Optional[str]] = [None, None],
         inplace: bool = True
     ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
         """Calculates cell embeddings and negative log-likelihood
 
         Parameters
         ----------
+        adata1
+            AnnData object corresponding to one modality of a multimodal single-cell dataset.
+        adata2
+            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
+        batch_size
+            Minibatch size.
+        batch_col
+            Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information
+        counts_layer
+            Keys in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
+            If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
+        transformed_obsm
+            Keys in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
+            representations of each individual modality. If ``None`` is provided,
+            the representations will be taken from ``X``.
+        inplace
+            Whether to modify ``adata1.obsm`` and ``adata2.obsm`` inplace with the embeddings.
+            If ``False``, both the embeddings and nll will be returned.
         """
         nlls = []
         if not self.use_decoder:
@@ -662,7 +695,7 @@ class Model(nn.Module):
             for name in self.emb_names:
                 embs[name].append(fwd_dict[name].detach().cpu())
             if nlls is not None:
-                nlls.append(fwd_dict['nll'].detach().item())
+                nlls.append(fwd_dict[NLL].detach().item())
 
         self._apply_to(
             adata1, adata2, batch_col, batch_size,
@@ -695,7 +728,31 @@ class Model(nn.Module):
         hyper_param_dict: Union[dict, None] = None,
         callback: Union[Callable, None] = None
     ) -> None:
-        """Docstring (TODO)
+        """Run the model for one iteration to obtain representations or
+        reconstructions.
+
+        Parameters
+        ----------
+        adata1
+            AnnData object corresponding to one modality of a multimodal single-cell dataset.
+        adata2
+            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
+        batch_col
+            Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information.
+        batch_size
+            Minibatch size.
+        counts_layer
+            Keys in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
+            If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
+        transformed_obsm
+            Keys in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
+            representations of each individual modality. If ``None`` is provided,
+            the representations will be taken from ``X``.
+        hyper_param_dict
+            Dictionary containing hyperparameters.
+        callback
+            Callback function to store representations and/or reconstructions.
+        ----------
         """
         sampler = CellSampler(
             adata1, adata2,
@@ -722,15 +779,15 @@ class Model(nn.Module):
         data_dict
             Dictionary containing the minibatch training data.
         """
-        mod1_input = data_dict["cells_1_transformed"]
+        mod1_input = data_dict['cells_1_transformed']
         batch_indices = data_dict.get('batch_indices', None)
         mod1_features = self.mod1_encoder(mod1_input)
         mu = F.normalize(mod1_features)
 
         mod2_reconstruct = self.decode(False, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod2_reconstruct['approx_features'])
-        return dict(latents=mu, reconstruction=mod2_reconstruct['reconstruction'])
+            return dict(latents=mu, reconstruction=mod2_reconstruct[FEATURES])
+        return dict(latents=mu, reconstruction=mod2_reconstruct[RECONSTRUCTION])
 
     def pred_mod2_mod1_forward(self,
         data_dict: Mapping[str, torch.Tensor],
@@ -742,12 +799,12 @@ class Model(nn.Module):
         data_dict
             Dictionary containing the minibatch training data.
         """
-        mod2_input = data_dict["cells_1_transformed"]  # Single modality data
+        mod2_input = data_dict['cells_1_transformed']  # Single modality data
         batch_indices = data_dict.get('batch_indices', None)
         mod2_features = self.mod2_encoder(mod2_input)
         mu = F.normalize(mod2_features)
 
         mod1_reconstruct = self.decode(True, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod1_reconstruct['approx_features'])
-        return dict(latents=mu, reconstruction=mod1_reconstruct['reconstruction'])
+            return dict(latents=mu, reconstruction=mod1_reconstruct[FEATURES])
+        return dict(latents=mu, reconstruction=mod1_reconstruct[RECONSTRUCTION])

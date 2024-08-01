@@ -1,20 +1,32 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union, Optional, Callable, Literal, List
-from enum import Enum
-import math
 import logging
+from typing import (
+    Any,
+    Callable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
-from anndata import AnnData
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
+from anndata import AnnData
 from batch_sampler import CellSampler
-from .log_likelihood import log_nb_positive
+
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
+from .log_likelihood import log_nb_positive
 from .losses import ClipLoss, DebiasedClipLoss, SigmoidLoss
-from .utils import get_fully_connected_layers, ConcentrationEncoder
+from .utils import (
+    ConcentrationEncoder,
+    HypersphericalUniform,
+    get_fully_connected_layers,
+)
 
 Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']
@@ -23,7 +35,21 @@ ModalityNumber = Literal['mod1', 'mod2', 'mod3']
 
 MOD1_EMB = 'mod1_features'
 MOD2_EMB = 'mod2_features'
-
+MOD3_EMB = 'mod3_features'
+MOD1_LOSS = 'mod1_loss'
+MOD2_LOSS = 'mod2_loss'
+MOD3_LOSS = 'mod3_loss'
+NLL = 'nll'
+CONTRASTIVE = 'contrastive'
+KL = 'KL'
+TEMP = 'temp'
+FEATURES = 'approx_features'
+RECONSTRUCTION = 'reconstruction'
+RECONSTRUCTION_LOSS = 'reconstruction_loss'
+MOD1_RECONSTRUCT_LOSS = 'mod1_reconstruction_loss'
+MOD2_RECONSTRUCT_LOSS = 'mod2_reconstruction_loss'
+MOD3_RECONSTRUCT_LOSS = 'mod3_reconstruction_loss'
+EPS = 1e-5
 
 _logger = logging.getLogger(__name__)
 
@@ -113,7 +139,7 @@ class Trimodel(nn.Module):
         Maximum temperature the CLIP loss can reach during training. If None, the
         temperature is unbounded.
     """
-    emb_names: Sequence[str] = [MOD1_EMB, MOD2_EMB]
+    emb_names: Sequence[str] = [MOD1_EMB, MOD2_EMB, MOD3_EMB]
 
     def __init__(
         self,
@@ -135,7 +161,7 @@ class Trimodel(nn.Module):
         reconstruct_mod2_fn: Optional[Callable] = None,
         reconstruct_mod3_fn: Optional[Callable] = None,
         loss_method: Loss = 'clip',
-        combine_method: Combine = "dropout",
+        combine_method: Combine = 'dropout',
         batch_dispersion: bool = False,
         use_norm: Literal['layer', 'batch', 'none'] = 'batch',
         dropout: float = 0.1,
@@ -146,7 +172,7 @@ class Trimodel(nn.Module):
         cosine_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
-        device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device=torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     ) -> None:
         super().__init__()
 
@@ -160,15 +186,15 @@ class Trimodel(nn.Module):
             raise ValueError("mod1_type must be one of 'rna', 'atac', 'protein', or 'other'")
         # Validate batch choices
         if batch_dispersion and n_batches == 1:
-            _logger.warning("With one batch provided, per-batch dispersion will be disabled")
+            _logger.warning('With one batch provided, per-batch dispersion will be disabled')
             batch_dispersion = False
         if batch_discriminative and n_batches == 1:
-            _logger.warning("With one batch provided, batch adversarial loss will be disabled")
+            _logger.warning('With one batch provided, batch adversarial loss will be disabled')
             batch_discriminative = False
         # Validate decoder choices
         if (reconstruct_mod1_fn is not None or reconstruct_mod2_fn is not None) and not use_decoder:
-            _logger.warning("Reconstruction functions were provided but decoding was turned off.\n"
-                            "The provided reconstruction functions will not be used.")
+            _logger.warning('Reconstruction functions were provided but decoding was turned off.\n'
+                            'The provided reconstruction functions will not be used.')
 
         # Model parameters
         self.device: torch.device = device
@@ -282,21 +308,21 @@ class Trimodel(nn.Module):
         self.mod1_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod1_input_dim,
-            (128, ),  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
         self.mod2_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod2_input_dim,
-            (128, ),  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
         self.mod3_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod3_input_dim,
-            (128, ),  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
@@ -389,10 +415,10 @@ class Trimodel(nn.Module):
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
         if not self.use_decoder:
             return {
-                'approx_features': approx_features,
-                'reconstruction': torch.zeros([]),
-                'reconstruction_loss': torch.zeros([]),
-                'nll': loss
+                FEATURES: approx_features,
+                RECONSTRUCTION: torch.zeros([]),
+                RECONSTRUCTION_LOSS: torch.zeros([]),
+                NLL: loss
             }
         if decode_modality == 'mod1':
             reconstruct_fn, reconstructor, mod_type, n_output = self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim
@@ -447,10 +473,10 @@ class Trimodel(nn.Module):
             )
             reconstruction_loss = torch.zeros([])
         return {
-            'approx_features': approx_features,
-            'reconstruction': reconstruct,
-            'reconstruction_loss': reconstruction_loss,
-            'nll': loss
+            FEATURES: approx_features,
+            RECONSTRUCTION: reconstruct,
+            RECONSTRUCTION_LOSS: reconstruction_loss,
+            NLL: loss
         }
 
     def combine_features(
@@ -513,7 +539,7 @@ class Trimodel(nn.Module):
 
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone(), mod3_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-        var = self.var_encoder(mod1_input, mod2_input, mod3_input) + 1e-5  # (batch_size,)
+        var = self.var_encoder(mod1_input, mod2_input, mod3_input) + EPS  # (batch_size,)
 
         z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
         if self.training:
@@ -525,35 +551,35 @@ class Trimodel(nn.Module):
         mod2_dict = self.decode('mod2', z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
         mod3_dict = self.decode('mod3', z, mod3_input, counts_3, library_size_3, cell_indices, batch_indices)
 
-        log_px_zl = mod1_dict['nll'] + mod2_dict['nll'] + mod3_dict['nll']
-        loss1 = mod1_dict['nll']
-        loss2 = mod2_dict['nll']
-        loss3 = mod3_dict['nll']
+        log_px_zl = mod1_dict[NLL] + mod2_dict[NLL] + mod3_dict[NLL]
+        loss1 = mod1_dict[NLL]
+        loss2 = mod2_dict[NLL]
+        loss3 = mod3_dict[NLL]
 
         logit_scale = self.logit_scale.exp()
         if self.cap_temperature is not None:
             logit_scale = torch.clamp(logit_scale, max=self.cap_temperature)
 
         fwd_dict = {
-            "mod1_features": mod1_features,
-            "mod2_features": mod2_features,
-            "mod3_features": mod3_features,
-            "temp": logit_scale.mean(),
-            "nll": log_px_zl.mean(),
-            "mod1_reconstruct_loss": mod1_dict["reconstruction_loss"],
-            "mod2_reconstruct_loss": mod2_dict["reconstruction_loss"],
-            "mod3_reconstruct_loss": mod3_dict["reconstruction_loss"],
-            "loss1": loss1,
-            "loss2": loss2,
-            "loss3": loss3
+            MOD1_EMB: mod1_features,
+            MOD2_EMB: mod2_features,
+            MOD3_EMB: mod3_features,
+            TEMP: logit_scale.mean(),
+            NLL: log_px_zl.mean(),
+            MOD1_RECONSTRUCT_LOSS: mod1_dict["reconstruction_loss"],
+            MOD2_RECONSTRUCT_LOSS: mod2_dict["reconstruction_loss"],
+            MOD3_RECONSTRUCT_LOSS: mod3_dict["reconstruction_loss"],
+            MOD1_LOSS: loss1,
+            MOD2_LOSS: loss2,
+            MOD3_LOSS: loss3
         }
         
         if self.use_decoder:
             fwd_dict['combined_features'] = z
         if self.use_decoder:
-            fwd_dict['mod1_reconstruct'] = mod1_dict['reconstruction']
-            fwd_dict['mod2_reconstruct'] = mod2_dict['reconstruction']
-            fwd_dict['mod3_reconstruct'] = mod3_dict['reconstruction']
+            fwd_dict['mod1_reconstruct'] = mod1_dict[RECONSTRUCTION]
+            fwd_dict['mod2_reconstruct'] = mod2_dict[RECONSTRUCTION]
+            fwd_dict['mod3_reconstruct'] = mod3_dict[RECONSTRUCTION]
 
         if not self.training:
             return fwd_dict
@@ -569,7 +595,7 @@ class Trimodel(nn.Module):
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale) + \
                 self.clip_loss(mod2_features, mod3_features, logit_scale) + \
                 self.clip_loss(mod1_features, mod3_features, logit_scale)
-        fwd_dict['contrastive'] = contrastive_loss
+        fwd_dict[CONTRASTIVE] = contrastive_loss
 
         loss = log_px_zl + contrastive_loss
 
@@ -608,18 +634,18 @@ class Trimodel(nn.Module):
 
         uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
         kl = _kl_powerspherical_uniform(z_dist, uni)
-        fwd_dict['KL'] = kl.mean()
+        fwd_dict[KL] = kl.mean()
         loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
 
-        record = dict(
-            loss=loss,
-            contrastive=fwd_dict['contrastive'],
-            KL=fwd_dict['KL'],
-            loss1=fwd_dict['loss1'],
-            loss2=fwd_dict['loss2'],
-            loss3=fwd_dict['loss3'],
-            temp=fwd_dict['temp'],
-        )
+        record = {
+            'loss': loss,
+            CONTRASTIVE: fwd_dict[TEMP],
+            KL: fwd_dict[KL],
+            MOD1_LOSS: fwd_dict[MOD1_LOSS],
+            MOD2_LOSS: fwd_dict[MOD2_LOSS],
+            MOD3_LOSS: fwd_dict[MOD3_LOSS],
+            TEMP: fwd_dict[TEMP]
+        }
         if self.modality_discriminative and self.training:
             record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
@@ -734,6 +760,26 @@ class Trimodel(nn.Module):
 
         Parameters
         ----------
+        adata1
+            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
+        adata2
+            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+        adata3
+            AnnData object corresponding to the third modality of a multimodal single-cell dataset. 
+        batch_size
+            Minibatch size.
+        batch_col
+            Column in ``adata1.obs``, ``adata2.obs``, and ``adata3.obs`` corresponding to batch information
+        counts_layer
+            Keys in ``adata1.layers``, ``adata2.layers``, and ``adata3.layers`` corresponding
+            to the raw counts for each modality. If ``None`` is provided, raw counts will be taken.
+        transformed_obsm
+            Keys in ``adata1.obsm``, ``adata2.obsm``, and ``adata3.obsm`` corresponding to the
+            low-dimension representations of each individual modality. If ``None`` is provided,
+            the representations will be taken from ``X``.
+        inplace
+            Whether to modify ``adata1.obsm`` and ``adata2.obsm`` inplace with the embeddings.
+            If ``False``, both the embeddings and nll will be returned.
         """
         nlls = []
         if not self.use_decoder:
@@ -782,7 +828,33 @@ class Trimodel(nn.Module):
         hyper_param_dict: Union[dict, None] = None,
         callback: Union[Callable, None] = None
     ) -> None:
-        """Docstring (TODO)
+        """Run the model for one iteration to obtain representations or
+        reconstructions.
+
+        
+        Parameters
+        ----------
+        adata1
+            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
+        adata2
+            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
+        adata3
+            AnnData object corresponding to the third modality of a multimodal single-cell dataset.
+        batch_col
+            Column in ``adata1.obs``, ``adata2.obs``, and ``adata3.obs`` corresponding to batch information 
+        batch_size
+            Minibatch size.
+        counts_layer
+            Keys in ``adata1.layers``, ``adata2.layers``, and ``adata3.layers`` corresponding
+            to the raw counts for each modality. If ``None`` is provided, raw counts will be taken.
+        transformed_obsm
+            Keys in ``adata1.obsm``, ``adata2.obsm``, and ``adata3.obsm`` corresponding to the
+            low-dimension representations of each individual modality. If ``None`` is provided,
+            the representations will be taken from ``X``.
+        hyper_param_dict
+            Dictionary containing hyperparameters.
+        callback
+            Callback function to store representations and/or reconstructions.
         """
         sampler = CellSampler(
             adata1, adata2, adata3,
@@ -823,58 +895,5 @@ class Trimodel(nn.Module):
 
         reconstruct = self.decode(to_modality, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=reconstruct['approx_features'])
-        return dict(latents=mu, reconstruction=reconstruct['reconstruction'])
-
-
-class HypersphericalUniform(torch.distributions.Distribution):
-
-    support = torch.distributions.constraints.real
-    has_rsample = False
-    _mean_carrier_measure = 0
-
-    @property
-    def dim(self):
-        return self._dim
-
-    @property
-    def device(self):
-        return self._device
-
-    @device.setter
-    def device(self, val):
-        self._device = val if isinstance(val, torch.device) else torch.device(val)
-
-    def __init__(self, dim, validate_args=None, device="cpu"):
-        super(HypersphericalUniform, self).__init__(
-            torch.Size([dim]), validate_args=validate_args
-        )
-        self._dim = dim
-        self.device = device
-
-    def sample(self, shape=torch.Size()):
-        output = (
-            torch.distributions.Normal(0, 1)
-            .sample(
-                (shape if isinstance(shape, torch.Size) else torch.Size([shape]))
-                + torch.Size([self._dim + 1])
-            )
-            .to(self.device)
-        )
-
-        return output / output.norm(dim=-1, keepdim=True)
-
-    def entropy(self):
-        return self.__log_surface_area()
-
-    def log_prob(self, x):
-        return -torch.ones(x.shape[:-1], device=self.device) * self.__log_surface_area()
-
-    def __log_surface_area(self):
-        if torch.__version__ >= "1.0.0":
-            lgamma = torch.lgamma(torch.tensor([(self._dim + 1) / 2]).to(self.device))
-        else:
-            lgamma = torch.lgamma(
-                torch.Tensor([(self._dim + 1) / 2], device=self.device)
-            )
-        return math.log(2) + ((self._dim + 1) / 2) * math.log(math.pi) - lgamma
+            return dict(latents=mu, reconstruction=reconstruct[FEATURES])
+        return dict(latents=mu, reconstruction=reconstruct[RECONSTRUCTION])

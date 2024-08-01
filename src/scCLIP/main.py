@@ -57,7 +57,8 @@ class scPairing:
     transformed_obsm
         Key(s) in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
         representations of each individual modality. If a string is provided, the same key will
-        be applied to both ``adata1.obsm`` and ``adata2.obsm``.
+        be applied to both ``adata1.obsm`` and ``adata2.obsm``. If ``None`` is provided,
+        the representations will be taken from ``adata1.X`` and/or ``adata2.X``.
     counts_layer
         Key(s) in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
         If a string is provided, the same key will be applied to both ``adata1.layers`` and ``adata2.layers``.
