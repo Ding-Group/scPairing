@@ -276,7 +276,6 @@ class Model(nn.Module):
         self.batch_dispersion: bool = batch_dispersion
         self._init_decoders()
 
-        self.device = device
         self.to(device)
 
     def _init_decoders(self):

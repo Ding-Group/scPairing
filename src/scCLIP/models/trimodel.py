@@ -267,7 +267,7 @@ class Trimodel(nn.Module):
         self.batch_discriminative: bool = batch_discriminative
         self.batch_discriminative_weight: float = batch_discriminative_weight
         if self.batch_discriminative:
-            self.batch_discriminator = get_fully_connected_layers(
+            self.batch_discriminator: nn.Module = get_fully_connected_layers(
                 self.emb_dim, self.n_batches,
                 self.discriminator_hidden_dims,
                 norm_type=self.norm,
@@ -300,7 +300,6 @@ class Trimodel(nn.Module):
         self.batch_dispersion: bool = batch_dispersion
         self._init_decoders()
 
-        self.device = device
         self.to(device)
 
     def _init_decoders(self):
@@ -879,6 +878,14 @@ class Trimodel(nn.Module):
     ) -> Mapping[str, Any]:
         """Forward pass for predicting from one modality to another.
         
+        Parameters
+        ----------
+        data_dict
+            Dictionary containing the minibatch training data.
+        from_modality
+            The modality given to the model.
+        to_modality
+            The modality the model will predict.
         """
         mod_input = data_dict["cells_1_transformed"]
         batch_indices = data_dict.get('batch_indices', None)
