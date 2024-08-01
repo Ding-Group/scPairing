@@ -269,7 +269,6 @@ class scPairing:
         self,
         adata1: Optional[AnnData] = None,
         adata2: Optional[AnnData] = None,
-        include_mse: bool = True,
         batch_size: int = 2000
     ) -> Tuple[np.array]:
         """Return the likelihoods for both modalities.
@@ -282,16 +281,15 @@ class scPairing:
         adata2
             AnnData object corresponding to the other modality of a multimodal single-cell dataset.
             If not provided, the AnnData provided on initialization will be used.
-        TODO: Does include_mse make sense?
         batch_size
             Minibatch size.
         """
-        if not include_mse and not self.model.use_decoder:
+        if not self.model.use_decoder:
             _logger.warning(
                 "The model has the full decoder disabled. "
                 "The full reconstruction losses will be all zero."
             )
-        if not include_mse and (self.model.reconstruct_mod1_fn is not None or self.model.reconstruct_mod2_fn is not None):
+        if self.model.use_decoder and (self.model.reconstruct_mod1_fn is not None or self.model.reconstruct_mod2_fn is not None):
             _logger.warning(
                 "The model has custom reconstruction functions. "
                 "The full reconstruction losses will be all zero."
@@ -317,9 +315,9 @@ class scPairing:
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
-            if include_mse:
-                mod1_nll += fwd_dict['nb']
-                mod2_nll += fwd_dict['bernoulli']
+
+            mod1_nll += fwd_dict['nb']
+            mod2_nll += fwd_dict['bernoulli']
             mod1_nll += fwd_dict['mod1_reconstruct_loss']
             mod2_nll += fwd_dict['mod2_reconstruct_loss']
         return mod1_nll.detach().numpy(), mod2_nll.detach().numpy()

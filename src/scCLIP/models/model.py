@@ -27,25 +27,11 @@ from .utils import (
     HypersphericalUniform,
     get_fully_connected_layers,
 )
+import models.constants as constants
 
 Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']
 Combine = Literal['dropout', 'average']
-
-MOD1_EMB = 'mod1_features'
-MOD2_EMB = 'mod2_features'
-MOD1_LOSS = 'mod1_loss'
-MOD2_LOSS = 'mod2_loss'
-NLL = 'nll'
-CONTRASTIVE = 'contrastive'
-KL = 'KL'
-TEMP = 'temp'
-FEATURES = 'approx_features'
-RECONSTRUCTION = 'reconstruction'
-RECONSTRUCTION_LOSS = 'reconstruction_loss'
-MOD1_RECONSTRUCT_LOSS = 'mod1_reconstruction_loss'
-MOD2_RECONSTRUCT_LOSS = 'mod2_reconstruction_loss'
-EPS = 1e-5
 
 
 _logger = logging.getLogger(__name__)
@@ -130,7 +116,7 @@ class Model(nn.Module):
         Maximum temperature the CLIP loss can reach during training. If None, the
         temperature is unbounded.
     """
-    emb_names: Sequence[str] = [MOD1_EMB, MOD2_EMB]
+    emb_names: Sequence[str] = [constants.MOD1_EMB, constants.MOD2_EMB]
 
     def __init__(
         self,
@@ -362,10 +348,10 @@ class Model(nn.Module):
         loss = torch.nn.MSELoss()(approx_features, embs) if not is_imputation else torch.zeros([])
         if not self.use_decoder:
             return {
-                FEATURES: approx_features,
-                RECONSTRUCTION: torch.zeros([]),
-                RECONSTRUCTION_LOSS: torch.zeros([]),
-                NLL: loss
+                constants.FEATURES: approx_features,
+                constants.RECONSTRUCTION: torch.zeros([]),
+                constants.RECONSTRUCTION_LOSS: torch.zeros([]),
+                constants.NLL: loss
             }
         reconstruct_fn, reconstructor, mod_type, n_output = (self.reconstruct_mod1_fn, self.mod1_reconstructor, self.mod1_type, self.mod1_output_dim) \
             if decode_mod1 else (self.reconstruct_mod2_fn, self.mod2_reconstructor, self.mod2_type, self.mod2_output_dim)
@@ -412,10 +398,10 @@ class Model(nn.Module):
             )
             reconstruction_loss = torch.zeros([])
         return {
-            FEATURES: approx_features,
-            RECONSTRUCTION: reconstruct,
-            RECONSTRUCTION_LOSS: reconstruction_loss,
-            NLL: loss
+            constants.FEATURES: approx_features,
+            constants.RECONSTRUCTION: reconstruct,
+            constants.RECONSTRUCTION_LOSS: reconstruction_loss,
+            constants.NLL: loss
         }
 
     def combine_features(
@@ -470,7 +456,7 @@ class Model(nn.Module):
 
         combined_features = self.combine_features(mod1_features.clone(), mod2_features.clone())  # (batch_size * emb_dim)
         combined_features = combined_features / torch.norm(combined_features, p=2, dim=-1, keepdim=True)
-        var = self.var_encoder(mod1_input, mod2_input) + EPS  # (batch_size,)
+        var = self.var_encoder(mod1_input, mod2_input) + constants.EPS  # (batch_size,)
 
         z_dist = PowerSpherical(combined_features, var.squeeze(-1))  # (batch_size, emb_dim)
         if self.training:
@@ -481,30 +467,30 @@ class Model(nn.Module):
         mod1_dict = self.decode(True, z, mod1_input, counts_1, library_size_1, cell_indices, batch_indices)
         mod2_dict = self.decode(False, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
 
-        log_px_zl = mod1_dict[NLL] + mod2_dict[NLL]
-        nb = mod1_dict[NLL]
-        bernoulli = mod2_dict[NLL]
+        log_px_zl = mod1_dict[constants.NLL] + mod2_dict[constants.NLL]
+        nb = mod1_dict[constants.NLL]
+        bernoulli = mod2_dict[constants.NLL]
 
         logit_scale = self.logit_scale.exp()
         if self.cap_temperature is not None:
             logit_scale = torch.clamp(logit_scale, max=self.cap_temperature)
 
         fwd_dict = {
-            MOD1_EMB: mod1_features,
-            MOD2_EMB: mod2_features,
-            TEMP: logit_scale.mean(),
-            NLL: log_px_zl.mean(),
-            MOD1_RECONSTRUCT_LOSS: mod1_dict[RECONSTRUCTION_LOSS],
-            MOD2_RECONSTRUCT_LOSS: mod2_dict[RECONSTRUCTION_LOSS],
-            MOD1_LOSS: nb,
-            MOD2_LOSS: bernoulli
+            constants.MOD1_EMB: mod1_features,
+            constants.MOD2_EMB: mod2_features,
+            constants.TEMP: logit_scale.mean(),
+            constants.NLL: log_px_zl.mean(),
+            constants.MOD1_RECONSTRUCT_LOSS: mod1_dict[constants.RECONSTRUCTION_LOSS],
+            constants.MOD2_RECONSTRUCT_LOSS: mod2_dict[constants.RECONSTRUCTION_LOSS],
+            constants.MOD1_LOSS: nb,
+            constants.MOD2_LOSS: bernoulli
         }
         
         if self.use_decoder:
             fwd_dict['combined_features'] = z
         if self.use_decoder:
-            fwd_dict['mod1_reconstruct'] = mod1_dict[RECONSTRUCTION]
-            fwd_dict['mod2_reconstruct'] = mod2_dict[RECONSTRUCTION]
+            fwd_dict['mod1_reconstruct'] = mod1_dict[constants.RECONSTRUCTION]
+            fwd_dict['mod2_reconstruct'] = mod2_dict[constants.RECONSTRUCTION]
 
         if not self.training:
             return fwd_dict
@@ -516,7 +502,7 @@ class Model(nn.Module):
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale, batch_indices)
         else:
             contrastive_loss = self.clip_loss(mod1_features, mod2_features, logit_scale)
-        fwd_dict[CONTRASTIVE] = contrastive_loss
+        fwd_dict[constants.CONTRASTIVE] = contrastive_loss
 
         loss = log_px_zl + contrastive_loss
 
@@ -547,20 +533,20 @@ class Model(nn.Module):
 
         uni = HypersphericalUniform(dim=self.emb_dim - 1, device=self.device)
         kl = _kl_powerspherical_uniform(z_dist, uni)
-        fwd_dict[KL] = kl.mean()
+        fwd_dict[constants.KL] = kl.mean()
         loss += kl.mean() * hyper_param_dict.get('kl_weight', 1)
 
         record = {
             'loss': loss,
-            CONTRASTIVE: fwd_dict[CONTRASTIVE],
-            KL: fwd_dict[KL],
-            MOD1_LOSS: fwd_dict[MOD1_LOSS],
-            MOD2_LOSS: fwd_dict[MOD2_LOSS],
-            TEMP: fwd_dict[TEMP],
+            constants.CONTRASTIVE: fwd_dict[constants.CONTRASTIVE],
+            constants.KL: fwd_dict[constants.KL],
+            constants.MOD1_LOSS: fwd_dict[constants.MOD1_LOSS],
+            constants.MOD2_LOSS: fwd_dict[constants.MOD2_LOSS],
+            constants.TEMP: fwd_dict[constants.TEMP],
         }
         if self.use_decoder:
-            record[MOD1_RECONSTRUCT_LOSS] = fwd_dict[MOD1_RECONSTRUCT_LOSS]
-            record[MOD2_RECONSTRUCT_LOSS] = fwd_dict[MOD2_RECONSTRUCT_LOSS]
+            record[constants.MOD1_RECONSTRUCT_LOSS] = fwd_dict[constants.MOD1_RECONSTRUCT_LOSS]
+            record[constants.MOD2_RECONSTRUCT_LOSS] = fwd_dict[constants.MOD2_RECONSTRUCT_LOSS]
         if self.modality_discriminative and self.training:
             record['modality_discriminative'] = fwd_dict['modality_discriminative']
         if self.batch_discriminative and self.training:
@@ -694,7 +680,7 @@ class Model(nn.Module):
             for name in self.emb_names:
                 embs[name].append(fwd_dict[name].detach().cpu())
             if nlls is not None:
-                nlls.append(fwd_dict[NLL].detach().item())
+                nlls.append(fwd_dict[constants.NLL].detach().item())
 
         self._apply_to(
             adata1, adata2, batch_col, batch_size,
@@ -785,8 +771,8 @@ class Model(nn.Module):
 
         mod2_reconstruct = self.decode(False, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod2_reconstruct[FEATURES])
-        return dict(latents=mu, reconstruction=mod2_reconstruct[RECONSTRUCTION])
+            return dict(latents=mu, reconstruction=mod2_reconstruct[constants.FEATURES])
+        return dict(latents=mu, reconstruction=mod2_reconstruct[constants.RECONSTRUCTION])
 
     def pred_mod2_mod1_forward(self,
         data_dict: Mapping[str, torch.Tensor],
@@ -805,5 +791,5 @@ class Model(nn.Module):
 
         mod1_reconstruct = self.decode(True, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod1_reconstruct[FEATURES])
-        return dict(latents=mu, reconstruction=mod1_reconstruct[RECONSTRUCTION])
+            return dict(latents=mu, reconstruction=mod1_reconstruct[constants.FEATURES])
+        return dict(latents=mu, reconstruction=mod1_reconstruct[constants.RECONSTRUCTION])
