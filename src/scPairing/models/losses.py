@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class ClipLoss(nn.Module):
     """
     Implementation of ClipLoss borrowed from OpenCLIP

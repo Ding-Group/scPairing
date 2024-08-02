@@ -7,17 +7,15 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
-    Tuple,
     Union,
 )
 
+import models.constants as constants
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from anndata import AnnData
-from batch_sampler import CellSampler
 
 from .distributions import PowerSpherical, _kl_powerspherical_uniform
 from .log_likelihood import log_nb_positive
@@ -27,7 +25,6 @@ from .utils import (
     HypersphericalUniform,
     get_fully_connected_layers,
 )
-import models.constants as constants
 
 Loss = Literal['clip', 'debiased_clip', 'sigmoid']
 Modalities = Literal['rna', 'atac', 'protein', 'other']

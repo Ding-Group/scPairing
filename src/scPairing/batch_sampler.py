@@ -1,12 +1,12 @@
-from typing import Iterator, List, Mapping, Union, Optional
+from typing import Iterator, List, Mapping, Optional, Union
 
 import anndata
 import numpy as np
 import pandas as pd
 import torch
-from torch import FloatTensor
 import torch.sparse
 from scipy.sparse import spmatrix
+from torch import FloatTensor
 
 
 class CellSampler():
