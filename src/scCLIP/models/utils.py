@@ -1,3 +1,4 @@
+import logging
 import math
 import random
 from typing import Literal, Optional, Sequence
@@ -5,6 +6,8 @@ from typing import Literal, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+
+_logger = logging.getLogger(__name__)
 
 
 def get_fully_connected_layers(
@@ -162,3 +165,4 @@ def set_seed(seed: int) -> None:
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    _logger.info(f'Set seed to {seed}.')

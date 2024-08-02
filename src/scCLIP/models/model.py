@@ -468,8 +468,8 @@ class Model(nn.Module):
         mod2_dict = self.decode(False, z, mod2_input, counts_2, library_size_2, cell_indices, batch_indices)
 
         log_px_zl = mod1_dict[constants.NLL] + mod2_dict[constants.NLL]
-        nb = mod1_dict[constants.NLL]
-        bernoulli = mod2_dict[constants.NLL]
+        mod1_loss = mod1_dict[constants.NLL]
+        mod2_loss = mod2_dict[constants.NLL]
 
         logit_scale = self.logit_scale.exp()
         if self.cap_temperature is not None:
@@ -482,15 +482,13 @@ class Model(nn.Module):
             constants.NLL: log_px_zl.mean(),
             constants.MOD1_RECONSTRUCT_LOSS: mod1_dict[constants.RECONSTRUCTION_LOSS],
             constants.MOD2_RECONSTRUCT_LOSS: mod2_dict[constants.RECONSTRUCTION_LOSS],
-            constants.MOD1_LOSS: nb,
-            constants.MOD2_LOSS: bernoulli
+            constants.MOD1_LOSS: mod1_loss,
+            constants.MOD2_LOSS: mod2_loss
         }
-        
+
         if self.use_decoder:
-            fwd_dict['combined_features'] = z
-        if self.use_decoder:
-            fwd_dict['mod1_reconstruct'] = mod1_dict[constants.RECONSTRUCTION]
-            fwd_dict['mod2_reconstruct'] = mod2_dict[constants.RECONSTRUCTION]
+            fwd_dict[constants.MOD1_RECONSTRUCT] = mod1_dict[constants.RECONSTRUCTION]
+            fwd_dict[constants.MOD2_RECONSTRUCT] = mod2_dict[constants.RECONSTRUCTION]
 
         if not self.training:
             return fwd_dict
@@ -635,125 +633,6 @@ class Model(nn.Module):
             optimizers[1].step()
         return new_record
 
-    def get_cell_embeddings_and_nll(
-        self,
-        adata1: anndata.AnnData,
-        adata2: anndata.AnnData,
-        batch_size: int = 2000,
-        batch_col: str = 'batch_indices',
-        counts_layer: List[Optional[str]] = [None, None],
-        transformed_obsm: List[Optional[str]] = [None, None],
-        inplace: bool = True
-    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
-        """Calculates cell embeddings and negative log-likelihood
-
-        Parameters
-        ----------
-        adata1
-            AnnData object corresponding to one modality of a multimodal single-cell dataset.
-        adata2
-            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
-        batch_size
-            Minibatch size.
-        batch_col
-            Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information
-        counts_layer
-            Keys in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
-            If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
-        transformed_obsm
-            Keys in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
-            representations of each individual modality. If ``None`` is provided,
-            the representations will be taken from ``X``.
-        inplace
-            Whether to modify ``adata1.obsm`` and ``adata2.obsm`` inplace with the embeddings.
-            If ``False``, both the embeddings and nll will be returned.
-        """
-        nlls = []
-        if not self.use_decoder:
-            nlls = None
-        self.eval()
-
-        embs = {name: [] for name in self.emb_names}
-        hyper_param_dict = dict(decode=nlls is not None)
-
-        def store_emb_and_nll(data_dict, fwd_dict):
-            for name in self.emb_names:
-                embs[name].append(fwd_dict[name].detach().cpu())
-            if nlls is not None:
-                nlls.append(fwd_dict[constants.NLL].detach().item())
-
-        self._apply_to(
-            adata1, adata2, batch_col, batch_size,
-            counts_layer=counts_layer,
-            transformed_obsm=transformed_obsm,
-            hyper_param_dict=hyper_param_dict,
-            callback=store_emb_and_nll
-        )
-
-        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in self.emb_names}
-        if nlls is not None:
-            nll = sum(nlls) / adata1.n_obs
-        else:
-            nll = None
-
-        if inplace:
-            adata1.obsm.update(embs)
-            adata2.obsm.update(embs)
-            return nll
-        else:
-            return embs, nll
-
-    def _apply_to(self,
-        adata1: anndata.AnnData,
-        adata2: anndata.AnnData,
-        batch_col: str = 'batch_indices',
-        batch_size: int = 2000,
-        counts_layer=None,
-        transformed_obsm=None,
-        hyper_param_dict: Union[dict, None] = None,
-        callback: Union[Callable, None] = None
-    ) -> None:
-        """Run the model for one iteration to obtain representations or
-        reconstructions.
-
-        Parameters
-        ----------
-        adata1
-            AnnData object corresponding to one modality of a multimodal single-cell dataset.
-        adata2
-            AnnData object corresponding to the other modality of a multimodal single-cell dataset.
-        batch_col
-            Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information.
-        batch_size
-            Minibatch size.
-        counts_layer
-            Keys in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
-            If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
-        transformed_obsm
-            Keys in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
-            representations of each individual modality. If ``None`` is provided,
-            the representations will be taken from ``X``.
-        hyper_param_dict
-            Dictionary containing hyperparameters.
-        callback
-            Callback function to store representations and/or reconstructions.
-        ----------
-        """
-        sampler = CellSampler(
-            adata1, adata2,
-            require_counts=self.use_decoder,
-            counts_layer=counts_layer,
-            transformed_obsm=transformed_obsm,
-            batch_size=batch_size, sample_batch_id=self.need_batch,
-            n_epochs=1, batch_col=batch_col, shuffle=False
-        )
-        self.eval()
-        for data_dict in sampler:
-            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self(data_dict, hyper_param_dict=hyper_param_dict)
-            if callback is not None:
-                callback(data_dict, fwd_dict)
-
     def pred_mod1_mod2_forward(self,
         data_dict: Mapping[str, torch.Tensor]
     ) -> Mapping[str, Any]:
@@ -771,8 +650,14 @@ class Model(nn.Module):
 
         mod2_reconstruct = self.decode(False, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod2_reconstruct[constants.FEATURES])
-        return dict(latents=mu, reconstruction=mod2_reconstruct[constants.RECONSTRUCTION])
+            return {
+                constants.REPRESENTATIONS: mu,
+                constants.RECONSTRUCTION: mod2_reconstruct[constants.FEATURES]
+            }
+        return {
+            constants.REPRESENTATIONS: mu,
+            constants.RECONSTRUCTION: mod2_reconstruct[constants.RECONSTRUCTION]
+        }
 
     def pred_mod2_mod1_forward(self,
         data_dict: Mapping[str, torch.Tensor],
@@ -791,5 +676,11 @@ class Model(nn.Module):
 
         mod1_reconstruct = self.decode(True, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=mod1_reconstruct[constants.FEATURES])
-        return dict(latents=mu, reconstruction=mod1_reconstruct[constants.RECONSTRUCTION])
+            return {
+                constants.REPRESENTATIONS: mu,
+                constants.RECONSTRUCTION: mod1_reconstruct[constants.FEATURES]
+            }
+        return {
+            constants.REPRESENTATIONS: mu,
+            constants.RECONSTRUCTION: mod1_reconstruct[constants.RECONSTRUCTION]
+        }

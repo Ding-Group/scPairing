@@ -8,9 +8,23 @@ from anndata import AnnData
 from batch_sampler import CellSampler
 from models.trimodel import Modalities, ModalityNumber, Trimodel
 from models.utils import set_seed
+import models.constants as constants
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 _logger = logging.getLogger(__name__)
+
+template_str = \
+"""scPairing model
+mod1: {}
+    low-dimensional representations: {}
+    counts layer: {}
+mod2: {}
+    low-dimensional representations: {}
+    counts layer: {}
+mod3: {}
+    low-dimensional representations: {}
+    counts layer: {}
+"""
 
 
 class triscPairing:
@@ -115,6 +129,9 @@ class triscPairing:
         self.adata1: AnnData = adata1
         self.adata2: AnnData = adata2
         self.adata3: AnnData = adata3
+        self.mod1_type: Modalities = mod1_type
+        self.mod2_type: Modalities = mod2_type
+        self.mod3_type: Modalities = mod3_type
         self.model: Trimodel = Trimodel(
             mod1_input_dim,
             mod2_input_dim,
@@ -224,9 +241,9 @@ class triscPairing:
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
-            mod1_features.append(fwd_dict['mod1_features'].detach().cpu())
-            mod2_features.append(fwd_dict['mod2_features'].detach().cpu())
-            mod3_features.append(fwd_dict['mod3_features'].detach().cpu())
+            mod1_features.append(fwd_dict[constants.MOD1_EMB].detach().cpu())
+            mod2_features.append(fwd_dict[constants.MOD2_EMB].detach().cpu())
+            mod3_features.append(fwd_dict[constants.MOD3_EMB].detach().cpu())
         
         mod1_features = torch.cat(mod1_features, dim=0).numpy()
         mod2_features = torch.cat(mod2_features, dim=0).numpy()
@@ -286,9 +303,9 @@ class triscPairing:
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
-            mod1_reconstruct.append(fwd_dict['mod1_reconstruct'].detach().cpu())
-            mod2_reconstruct.append(fwd_dict['mod2_reconstruct'].detach().cpu())
-            mod3_reconstruct.append(fwd_dict['mod3_reconstruct'].detach().cpu())
+            mod1_reconstruct.append(fwd_dict[constants.MOD1_RECONSTRUCT].detach().cpu())
+            mod2_reconstruct.append(fwd_dict[constants.MOD2_RECONSTRUCT].detach().cpu())
+            mod3_reconstruct.append(fwd_dict[constants.MOD3_RECONSTRUCT].detach().cpu())
         
         mod1_reconstruct = torch.cat(mod1_reconstruct, dim=0).numpy()
         mod2_reconstruct = torch.cat(mod2_reconstruct, dim=0).numpy()
@@ -353,13 +370,19 @@ class triscPairing:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
 
-            mod1_nll += fwd_dict['loss1']
-            mod2_nll += fwd_dict['loss2']
-            mod3_nll += fwd_dict['loss3']
-            mod1_nll += fwd_dict['mod1_reconstruct_loss']
-            mod2_nll += fwd_dict['mod2_reconstruct_loss']
-            mod3_nll += fwd_dict['mod3_reconstruct_loss']
-        return mod1_nll.detach().numpy(), mod2_nll.detach().numpy(), mod3_nll.detach().numpy()
+            n_cells = data_dict['cells_1_transformed'].shape[0]
+
+            mod1_nll += fwd_dict[constants.MOD1_LOSS] * n_cells
+            mod2_nll += fwd_dict[constants.MOD2_LOSS] * n_cells
+            mod3_nll += fwd_dict[constants.MOD3_LOSS] * n_cells
+            mod1_nll += fwd_dict[constants.MOD1_RECONSTRUCTION_LOSS] * n_cells
+            mod2_nll += fwd_dict[constants.MOD2_RECONSTRUCTION_LOSS] * n_cells
+            mod3_nll += fwd_dict[constants.MOD3_RECONSTRUCTION_LOSS] * n_cells
+        return {
+            constants.MOD1_LOSS: mod1_nll.detach().numpy() / adata1.n_obs,
+            constants.MOD2_LOSS: mod2_nll.detach().numpy() / adata2.n_obs,
+            constants.MOD3_LOSS: mod3_nll.detach().numpy() / adata3.n_obs
+        }
 
     def get_cross_modality_expression(
         self,
@@ -489,7 +512,16 @@ class triscPairing:
         path = os.path.join(dir_path, f"{prefix}model.pt")
         self.model.load_state_dict(torch.load(path))
 
-    # def __str__(self) -> str:
-    #     """
-    #     """
-    #     pass
+    def __repr__(self) -> str:
+        """Returns a string representation of the model."""
+        return template_str.format(
+            self.mod1_type,
+            self.transformed_obsm[0] or 'X',
+            self.counts_layer[0] or 'X',
+            self.mod2_type,
+            self.transformed_obsm[1] or 'X',
+            self.counts_layer[1] or 'X',
+            self.mod3_type,
+            self.transformed_obsm[2] or 'X',
+            self.counts_layer[2] or 'X'
+        )

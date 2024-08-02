@@ -549,20 +549,18 @@ class Trimodel(nn.Module):
             constants.MOD3_EMB: mod3_features,
             constants.TEMP: logit_scale.mean(),
             constants.NLL: log_px_zl.mean(),
-            constants.MOD1_RECONSTRUCT_LOSS: mod1_dict["reconstruction_loss"],
-            constants.MOD2_RECONSTRUCT_LOSS: mod2_dict["reconstruction_loss"],
-            constants.MOD3_RECONSTRUCT_LOSS: mod3_dict["reconstruction_loss"],
+            constants.MOD1_RECONSTRUCT_LOSS: mod1_dict[constants.RECONSTRUCTION_LOSS],
+            constants.MOD2_RECONSTRUCT_LOSS: mod2_dict[constants.RECONSTRUCTION_LOSS],
+            constants.MOD3_RECONSTRUCT_LOSS: mod3_dict[constants.RECONSTRUCTION_LOSS],
             constants.MOD1_LOSS: loss1,
             constants.MOD2_LOSS: loss2,
             constants.MOD3_LOSS: loss3
         }
-        
+
         if self.use_decoder:
-            fwd_dict['combined_features'] = z
-        if self.use_decoder:
-            fwd_dict['mod1_reconstruct'] = mod1_dict[constants.RECONSTRUCTION]
-            fwd_dict['mod2_reconstruct'] = mod2_dict[constants.RECONSTRUCTION]
-            fwd_dict['mod3_reconstruct'] = mod3_dict[constants.RECONSTRUCTION]
+            fwd_dict[constants.MOD1_RECONSTRUCT] = mod1_dict[constants.RECONSTRUCTION]
+            fwd_dict[constants.MOD2_RECONSTRUCT] = mod2_dict[constants.RECONSTRUCTION]
+            fwd_dict[constants.MOD3_RECONSTRUCT] = mod3_dict[constants.RECONSTRUCTION]
 
         if not self.training:
             return fwd_dict
@@ -728,132 +726,6 @@ class Trimodel(nn.Module):
             optimizers[1].step()
         return new_record
 
-    def get_cell_embeddings_and_nll(
-        self,
-        adata1: AnnData,
-        adata2: AnnData,
-        adata3: AnnData,
-        batch_size: int = 2000,
-        batch_col: str = 'batch_indices',
-        counts_layer=None,
-        transformed_obsm=None,
-        inplace: bool = True
-    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
-        """Calculates cell embeddings and negative log-likelihood
-
-        Parameters
-        ----------
-        adata1
-            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
-        adata2
-            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
-        adata3
-            AnnData object corresponding to the third modality of a multimodal single-cell dataset. 
-        batch_size
-            Minibatch size.
-        batch_col
-            Column in ``adata1.obs``, ``adata2.obs``, and ``adata3.obs`` corresponding to batch information
-        counts_layer
-            Keys in ``adata1.layers``, ``adata2.layers``, and ``adata3.layers`` corresponding
-            to the raw counts for each modality. If ``None`` is provided, raw counts will be taken.
-        transformed_obsm
-            Keys in ``adata1.obsm``, ``adata2.obsm``, and ``adata3.obsm`` corresponding to the
-            low-dimension representations of each individual modality. If ``None`` is provided,
-            the representations will be taken from ``X``.
-        inplace
-            Whether to modify ``adata1.obsm`` and ``adata2.obsm`` inplace with the embeddings.
-            If ``False``, both the embeddings and nll will be returned.
-        """
-        nlls = []
-        if not self.use_decoder:
-            nlls = None
-        self.eval()
-
-        embs = {name: [] for name in self.emb_names}
-        hyper_param_dict = dict(decode=nlls is not None)
-
-        def store_emb_and_nll(data_dict, fwd_dict):
-            for name in self.emb_names:
-                embs[name].append(fwd_dict[name].detach().cpu())
-            if nlls is not None:
-                nlls.append(fwd_dict['nll'].detach().item())
-
-        self._apply_to(
-            adata1, adata2, adata3, batch_col, batch_size,
-            counts_layer=counts_layer,
-            transformed_obsm=transformed_obsm,
-            hyper_param_dict=hyper_param_dict,
-            callback=store_emb_and_nll
-        )
-
-        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in self.emb_names}
-        if nlls is not None:
-            nll = sum(nlls) / adata1.n_obs
-        else:
-            nll = None
-
-        if inplace:
-            adata1.obsm.update(embs)
-            adata2.obsm.update(embs)
-            adata3.obsm.update(embs)
-            return nll
-        else:
-            return embs, nll
-
-    def _apply_to(self,
-        adata1: AnnData,
-        adata2: AnnData,
-        adata3: AnnData,
-        batch_col: str = 'batch_indices',
-        batch_size: int = 2000,
-        counts_layer=None,
-        transformed_obsm=None,
-        hyper_param_dict: Union[dict, None] = None,
-        callback: Union[Callable, None] = None
-    ) -> None:
-        """Run the model for one iteration to obtain representations or
-        reconstructions.
-
-        
-        Parameters
-        ----------
-        adata1
-            AnnData object corresponding to the first modality of a multimodal single-cell dataset.
-        adata2
-            AnnData object corresponding to the second modality of a multimodal single-cell dataset.
-        adata3
-            AnnData object corresponding to the third modality of a multimodal single-cell dataset.
-        batch_col
-            Column in ``adata1.obs``, ``adata2.obs``, and ``adata3.obs`` corresponding to batch information 
-        batch_size
-            Minibatch size.
-        counts_layer
-            Keys in ``adata1.layers``, ``adata2.layers``, and ``adata3.layers`` corresponding
-            to the raw counts for each modality. If ``None`` is provided, raw counts will be taken.
-        transformed_obsm
-            Keys in ``adata1.obsm``, ``adata2.obsm``, and ``adata3.obsm`` corresponding to the
-            low-dimension representations of each individual modality. If ``None`` is provided,
-            the representations will be taken from ``X``.
-        hyper_param_dict
-            Dictionary containing hyperparameters.
-        callback
-            Callback function to store representations and/or reconstructions.
-        """
-        sampler = CellSampler(
-            adata1, adata2, adata3,
-            require_counts=self.use_decoder,
-            counts_layer=counts_layer,
-            transformed_obsm=transformed_obsm,
-            batch_size=batch_size, sample_batch_id=self.need_batch,
-            n_epochs=1, batch_col=batch_col, shuffle=False
-        )
-        self.eval()
-        for data_dict in sampler:
-            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
-            fwd_dict = self(data_dict, hyper_param_dict=hyper_param_dict)
-            if callback is not None:
-                callback(data_dict, fwd_dict)
-
     def intermodality_prediction(
         self,
         data_dict: Mapping[str, torch.Tensor],
@@ -886,5 +758,11 @@ class Trimodel(nn.Module):
 
         reconstruct = self.decode(to_modality, mu, None, None, None, None, batch_indices, True)
         if not self.use_decoder:
-            return dict(latents=mu, reconstruction=reconstruct[constants.FEATURES])
-        return dict(latents=mu, reconstruction=reconstruct[constants.RECONSTRUCTION])
+            return {
+                constants.REPRESENTATIONS: mu,
+                constants.RECONSTRUCTION: reconstruct[constants.FEATURES]
+            }
+        return {
+            constants.REPRESENTATIONS: mu,
+            constants.RECONSTRUCTION: reconstruct[constants.RECONSTRUCTION]
+        }

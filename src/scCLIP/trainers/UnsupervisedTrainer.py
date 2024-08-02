@@ -13,10 +13,9 @@ from torch import optim
 import wandb
 
 from batch_sampler import CellSampler
-from eval_utils import evaluate
 from models import model
 from logging_utils import initialize_logger, log_arguments
-from .trainer_utils import train_test_split, train_test_split_cite, _stats_recorder
+from .trainer_utils import _stats_recorder
 
 _logger = logging.getLogger(__name__)
 
@@ -35,7 +34,8 @@ class UnsupervisedTrainer:
         AnnData object corresponding to the first modality of a multimodal single-cell dataset.
     adata2
         AnnData object corresponding to the second modality of a multimodal single-cell dataset.
-    adata3: the intact single-cell dataset (third modality), if there is one.
+    adata3
+        AnnData object corresponding to the third modality of a multimodal single-cell dataset, if it exists.
     counts_layer
         Key(s) in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
         If a string is provided, the same key will be applied to both ``adata1.layers`` and ``adata2.layers``.
@@ -45,9 +45,7 @@ class UnsupervisedTrainer:
         representations of each individual modality. If a string is provided, the same key will
         be applied to both ``adata1.obsm`` and ``adata2.obsm``.
     ckpt_dir
-        Directory to store the logs, the checkpoints and the plots.
-    test_ratio
-        Ratio of the test data.
+        Directory to store the logs and the checkpoints.
     init_lr
         Initial learning rate.
     lr_decay
@@ -73,22 +71,17 @@ class UnsupervisedTrainer:
         counts_layer: Optional[Union[str, List[str]]] = None,
         transformed_obsm: Optional[Union[str, List[str]]] = None,
         ckpt_dir: Union[str, None] = None,
-        test_ratio: float = 0.,
-        data_split_seed: int = 1,
         init_lr: float = 5e-3,
         lr_decay: float = 6e-5,
         weight_decay: float = 0.,
         batch_size: int = 2000,
-        train_instance_name: str = "scCLIP"
+        train_instance_name: str = "scPairing"
     ) -> None:
-        self.model: model.scCLIP = model
+        self.model: model.Model = model
 
-        self.train_adata1 = self.test_adata1 = self.adata1 = adata1
-        self.train_adata2 = self.test_adata2 = self.adata2 = adata2
-        self.train_adata3 = self.test_adata3 = self.adata3 = adata3
-        if test_ratio > 0:
-            self.train_adata1, self.test_adata1, self.train_adata2, self.test_adata2 = \
-                train_test_split_cite(adata1, adata2, test_ratio, seed=data_split_seed)
+        self.adata1 = adata1
+        self.adata2 = adata2
+        self.adata3 = adata3
 
         self.counts_layer = counts_layer
 
@@ -115,7 +108,7 @@ class UnsupervisedTrainer:
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
-        self.steps_per_epoch = max(self.train_adata1.n_obs / self.batch_size, 1)
+        self.steps_per_epoch = max(self.adata1.n_obs / self.batch_size, 1)
         self.device = model.device
         self.step = self.epoch = 0
 
@@ -200,8 +193,7 @@ class UnsupervisedTrainer:
         ping_every: Optional[int] = None,
         record_log_path: Union[str, None] = None,
         writer = None,
-        seed: Optional[int] = None,
-        **train_kwargs
+        seed: Optional[int] = None
     ) -> None:
         """Trains the model, optionally evaluates performance and logs results.
 
@@ -231,9 +223,9 @@ class UnsupervisedTrainer:
         
         # set up sampler and dataloader
         sampler = CellSampler(
-            self.train_adata1,
-            self.train_adata2,
-            self.train_adata3,
+            self.adata1,
+            self.adata2,
+            self.adata3,
             batch_size=self.batch_size,
             require_counts=need_reconstruction,
             counts_layer=self.counts_layer,
@@ -271,18 +263,12 @@ class UnsupervisedTrainer:
 
                 # log statistics of tracked items
                 recorder.log_and_clear_record()
-                if self.test_adata1 is not self.adata1:
-                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata1, self.test_adata2, self.batch_size, batch_col=batch_col, emb_names=[])
-                    if test_nll is not None:
-                        _logger.info(f'test nll: {test_nll:7.4f}')
-                else:
-                    test_nll = None
 
                 if next_ckpt_epoch and save_model_ckpt and self.ckpt_dir is not None:
                     # checkpointing
                     self.save_model_and_optimizer(next_ckpt_epoch)
 
-                _logger.info('=' * 10 + f'End of evaluation' + '=' * 10)
+                _logger.info('=' * 10 + 'End of evaluation' + '=' * 10)
                 next_ckpt_epoch = min(eval_every + next_ckpt_epoch, n_epochs)
 
         # log_file.close()

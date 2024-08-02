@@ -8,10 +8,20 @@ from anndata import AnnData
 from batch_sampler import CellSampler
 from models.model import Modalities, Model
 from models.utils import set_seed
+import models.constants as constants
 from trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 _logger = logging.getLogger(__name__)
 
+template_str = \
+"""scPairing model
+mod1: {}
+    low-dimensional representations: {}
+    counts layer: {}
+mod2: {}
+    low-dimensional representations: {}
+    counts layer: {}
+"""
 
 class scPairing:
     """Multimodal data integration using contrastive learning and variational inference.
@@ -107,6 +117,8 @@ class scPairing:
 
         self.adata1: AnnData = adata1
         self.adata2: AnnData = adata2
+        self.mod1_type: Modalities = mod1_type
+        self.mod2_type: Modalities = mod2_type
         self.model: scPairing = Model(
             mod1_input_dim,
             mod2_input_dim,
@@ -205,8 +217,8 @@ class scPairing:
         for data_dict in sampler:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
-            mod1_features.append(fwd_dict['mod1_features'].detach().cpu())
-            mod2_features.append(fwd_dict['mod2_features'].detach().cpu())
+            mod1_features.append(fwd_dict[constants.MOD1_EMB].detach().cpu())
+            mod2_features.append(fwd_dict[constants.MOD2_EMB].detach().cpu())
         
         mod1_features = torch.cat(mod1_features, dim=0).numpy()
         mod2_features = torch.cat(mod2_features, dim=0).numpy()
@@ -316,11 +328,16 @@ class scPairing:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model(data_dict, hyper_param_dict=dict())
 
-            mod1_nll += fwd_dict['nb']
-            mod2_nll += fwd_dict['bernoulli']
-            mod1_nll += fwd_dict['mod1_reconstruct_loss']
-            mod2_nll += fwd_dict['mod2_reconstruct_loss']
-        return mod1_nll.detach().numpy(), mod2_nll.detach().numpy()
+            n_cells = data_dict['cells_1_transformed'].shape[0]
+
+            mod1_nll += fwd_dict[constants.MOD1_LOSS] * n_cells
+            mod2_nll += fwd_dict[constants.MOD2_LOSS] * n_cells
+            mod1_nll += fwd_dict[constants.MOD1_RECONSTRUCT_LOSS] * n_cells
+            mod2_nll += fwd_dict[constants.MOD2_RECONSTRUCT_LOSS] * n_cells
+        return {
+            constants.MOD1_LOSS: mod1_nll.detach().numpy() / adata1.n_obs,
+            constants.MOD2_LOSS: mod2_nll.detach().numpy() / adata2.n_obs
+        }
 
     def get_cross_modality_expression(
         self,
@@ -383,8 +400,8 @@ class scPairing:
             data_dict = {k: v.to(self.model.device) for k, v in data_dict.items()}
             fwd_dict = self.model.pred_mod1_mod2_forward(data_dict) if mod1_to_mod2 \
                 else self.model.pred_mod2_mod1_forward(data_dict)
-            reconstructs.append(fwd_dict['reconstruction'].detach().cpu())
-            latents.append(fwd_dict['latents'].detach().cpu())
+            reconstructs.append(fwd_dict[constants.RECONSTRUCTION].detach().cpu())
+            latents.append(fwd_dict[constants.REPRESENTATIONS].detach().cpu())
         reconstructs = torch.cat(reconstructs, dim=0).numpy()
         latents = torch.cat(latents, dim=0).numpy()
         return reconstructs, latents
@@ -430,10 +447,16 @@ class scPairing:
         prefix
             Prefix to prepend to file names.
         """
-        path = os.path.join(dir_path, f"{prefix}model.pt")
+        path = os.path.join(dir_path, f'{prefix}model.pt')
         self.model.load_state_dict(torch.load(path))
 
-    # def __str__(self) -> str:
-    #     """
-    #     """
-    #     pass
+    def __repr__(self) -> str:
+        """Returns a string representation of the model."""
+        return template_str.format(
+            self.mod1_type,
+            self.transformed_obsm[0] or 'X',
+            self.counts_layer[0] or 'X',
+            self.mod2_type,
+            self.transformed_obsm[1] or 'X',
+            self.counts_layer[1] or 'X'
+        )
