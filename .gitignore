@@ -9,3 +9,6 @@ libraries/
 *.out
 */.ipynb_checkpoints
 src/benchmarking/wandb/
+benchmarking
+experiments
+*/scPairing.egg-info
