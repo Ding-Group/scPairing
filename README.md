@@ -1,4 +1,4 @@
-# ModelName
+# scPairing
 
 This model borrows code for model training and batch sampling from [scETM](https://github.com/hui2000ji/scETM) (Zhao *et al.*, 2021) and terminology from [scVI](https://github.com/scverse/scvi-tools) (Lopez *et al.*, 2018).
 We thank the respective authors for making their code available to the community.
