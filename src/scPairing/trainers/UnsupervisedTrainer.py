@@ -1,20 +1,17 @@
-import os
-from pathlib import Path
-from matplotlib.figure import Figure
-import time
-from typing import Mapping, Union, Tuple, Optional, List
-import psutil
 import logging
+import os
+import time
+from typing import List, Mapping, Optional, Union
 
-import numpy as np
 import anndata
+import numpy as np
 import torch
-from torch import optim
 import wandb
+from torch import optim
 
-from batch_sampler import CellSampler
-from models import model
-from logging_utils import initialize_logger, log_arguments
+from ..batch_sampler import CellSampler
+from ..logging_utils import initialize_logger, log_arguments
+from ..models import model
 from .trainer_utils import _stats_recorder
 
 _logger = logging.getLogger(__name__)

@@ -1,28 +1,26 @@
-from math import inf
-import os
 import logging
-import numpy as np
-import scanpy as sc
-import anndata as ad
-import pandas as pd
-# from torch.utils.tensorboard import SummaryWriter
-import matplotlib
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
-import scipy
-from scipy.sparse.csr import spmatrix
-from scipy.stats import chi2
-from scipy.special import softmax
-from typing import Mapping, Sequence, Tuple, Iterable, Union
-from scipy.sparse import issparse
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_samples
-from sklearn.neighbors import NearestNeighbors
-from logging_utils import log_arguments
-import psutil
+import os
+from math import inf
+from typing import Iterable, Mapping, Sequence, Tuple, Union
 
-# _cpu_count: Union[None, int] = psutil.cpu_count(logical=False)
-# if _cpu_count is None:
-#     _cpu_count: int = psutil.cpu_count(logical=True)
+import anndata as ad
+
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scipy
+from logging_utils import log_arguments
+from matplotlib.figure import Figure
+from scipy.special import softmax
+from scipy.stats import chi2
+from sklearn.metrics import (
+    adjusted_rand_score,
+    normalized_mutual_info_score,
+    silhouette_samples,
+)
+
 _cpu_count = 1
 _logger = logging.getLogger(__name__)
 

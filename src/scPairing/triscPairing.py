@@ -5,11 +5,12 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 from anndata import AnnData
-from batch_sampler import CellSampler
-from models.trimodel import Modalities, ModalityNumber, Trimodel
-from models.utils import set_seed
-import models.constants as constants
-from trainers.UnsupervisedTrainer import UnsupervisedTrainer
+
+from .batch_sampler import CellSampler
+from .models import constants as constants
+from .models.trimodel import Modalities, ModalityNumber, Trimodel
+from .models.utils import set_seed
+from .trainers.UnsupervisedTrainer import UnsupervisedTrainer
 
 _logger = logging.getLogger(__name__)
 

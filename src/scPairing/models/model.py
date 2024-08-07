@@ -10,7 +10,8 @@ from typing import (
     Union,
 )
 
-import models.constants as constants
+# import models.constants as constants
+from ..models import constants
 import numpy as np
 import torch
 import torch.nn as nn

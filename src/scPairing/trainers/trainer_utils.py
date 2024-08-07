@@ -1,19 +1,17 @@
-import os
 import copy
-import pandas as pd
-import random
-from typing import DefaultDict, IO, List, Sequence, Union, Tuple
 import logging
+import os
+import random
 from collections import defaultdict
+from typing import IO, DefaultDict, List, Sequence, Tuple, Union
 
-import numpy as np
 import anndata
+import numpy as np
+import pandas as pd
 import torch
 from torch import nn
-# from torch.utils.tensorboard import SummaryWriter
 
-# from models import scETM
-from logging_utils import log_arguments
+from ..logging_utils import log_arguments
 
 _logger = logging.getLogger(__name__)
 
