@@ -109,8 +109,6 @@ class Trimodel(nn.Module):
     batch_discriminative
         Whether to adversarially train a discriminator that aims to
         predict which batch a particular embedding came from.
-    discriminator_hidden_dims
-        Number of nodes and depth of the discriminator(s)
     cosine_loss
         Whether to subtract the cosine similarity between the two modality embeddings
         into the total loss.
@@ -150,7 +148,6 @@ class Trimodel(nn.Module):
         modality_discriminative: bool = True,
         batch_discriminative: bool = False,
         batch_discriminative_weight: float = 1,
-        discriminator_hidden_dims: Sequence[int] = (128,),
         cosine_loss: bool = True,
         set_temperature: Optional[float] = None,
         cap_temperature: Optional[float] = None,
@@ -237,23 +234,22 @@ class Trimodel(nn.Module):
             self.logit_scale: nn.Parameter = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.modality_discriminative: bool = modality_discriminative
-        self.discriminator_hidden_dims: Sequence[int] = discriminator_hidden_dims
         if self.modality_discriminative:
-            self.modality_discriminator: nn.Module = get_fully_connected_layers(
-                self.emb_dim, 3,
-                self.discriminator_hidden_dims,
-                norm_type = self.norm,
-                dropout_prob=self.dropout
+            self.modality_discriminator = nn.Sequential(
+                nn.Linear(self.emb_dim, 128),
+                nn.LayerNorm(128),
+                nn.ELU(),
+                nn.Linear(128, 3)  # Directly predict binary
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
         self.batch_discriminative: bool = batch_discriminative
         self.batch_discriminative_weight: float = batch_discriminative_weight
         if self.batch_discriminative:
-            self.batch_discriminator: nn.Module = get_fully_connected_layers(
-                self.emb_dim, self.n_batches,
-                self.discriminator_hidden_dims,
-                norm_type=self.norm,
-                dropout_prob=self.dropout
+            self.batch_discriminator = nn.Sequential(
+                nn.Linear(self.emb_dim, 128),
+                nn.LayerNorm(128),
+                nn.ELU(),
+                nn.Linear(128, self.n_batches)
             )
             self.ce_loss: nn.Module = nn.CrossEntropyLoss()
 
@@ -289,21 +285,21 @@ class Trimodel(nn.Module):
         self.mod1_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod1_input_dim,
-            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
         self.mod2_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod2_input_dim,
-            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,
             norm_type=self.norm,
             dropout_prob=self.dropout
         )
         self.mod3_decoder: nn.Module = get_fully_connected_layers(
             self.emb_dim,
             self.mod3_input_dim,
-            self.decoder_hidden_dims,  # TODO: Make this a hyperparameter
+            self.decoder_hidden_dims,
             norm_type=self.norm,
             dropout_prob=self.dropout
         )

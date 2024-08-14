@@ -4,14 +4,12 @@ from math import inf
 from typing import Iterable, Mapping, Sequence, Tuple, Union
 
 import anndata as ad
-
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy
-from logging_utils import log_arguments
 from matplotlib.figure import Figure
 from scipy.special import softmax
 from scipy.stats import chi2
@@ -20,6 +18,8 @@ from sklearn.metrics import (
     normalized_mutual_info_score,
     silhouette_samples,
 )
+
+from .logging_utils import log_arguments
 
 _cpu_count = 1
 _logger = logging.getLogger(__name__)
