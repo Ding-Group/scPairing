@@ -6,7 +6,6 @@ from typing import List, Mapping, Optional, Union
 import anndata
 import numpy as np
 import torch
-import wandb
 from torch import optim
 
 from ..batch_sampler import CellSampler
@@ -306,7 +305,5 @@ class UnsupervisedTrainer:
 
         # train for one step, record tracked items (e.g. loss)
         new_record = self.model.train_step([self.optimizer, self.discriminator_optimizer] , data_dict, hyper_param_dict)
-        if wandb.run is not None:
-            wandb.log(new_record)
 
         return new_record, hyper_param_dict
