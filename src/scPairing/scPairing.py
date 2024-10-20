@@ -70,7 +70,7 @@ class scPairing:
     seed
         Random seed for model reproducibility.
     **model_kwargs
-        Keyword args for scCLIP.
+        Keyword args for scPairing.
     """
     trainer = None
 
