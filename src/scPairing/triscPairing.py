@@ -49,17 +49,17 @@ class triscPairing:
     mod2_type
         The modality type of adata2. The options are identical to mod1_type.
     mod3_type
-        The modality type of adata2. The options are identical to mod1_type.
+        The modality type of adata3. The options are identical to mod1_type.
     batch_col
-        Column in ``adata1.obs`` and ``adata2.obs`` corresponding to batch information
+        Column in ``adata1.obs``, ``adata2.obs``, and ``adata3.obs`` corresponding to batch information.
     transformed_obsm
-        Key(s) in ``adata1.obsm`` and ``adata2.obsm`` corresponding to the low-dimension
+        Key(s) in ``adata1.obsm``, ``adata2.obsm``, and ``adata3.obsm`` corresponding to the low-dimension
         representations of each individual modality. If a string is provided, the same key will
-        be applied to both ``adata1.obsm`` and ``adata2.obsm``.
+        be applied to all three AnnData ``.obsm``s.
     counts_layer
-        Key(s) in ``adata1.layers`` and ``adata2.layers`` corresponding to the raw counts for each modality.
-        If a string is provided, the same key will be applied to both ``adata1.layers`` and ``adata2.layers``.
-        If ``None`` is provided, raw counts will be taken from ``adata1.X`` and/or ``adata2.X``.
+        Key(s) in ``adata1.layers``, ``adata2.layers``, and ``adata3.layers`` corresponding to the raw counts for each modality.
+        If a string is provided, the same key will be applied to both all three AnnData `.layers`.
+        If ``None`` is provided, raw counts will be taken from the `X` slot.
     use_decoder
         Whether to train a decoder to reconstruct the counts on top of the low-dimension representations.
     emb_dim
@@ -74,6 +74,9 @@ class triscPairing:
     reconstruct_mod2_fn
         Custom function that reconstructs the counts from the reconstructed low-dimension representations
         for the second modality.
+    reconstruct_mod2_fn
+        Custom function that reconstructs the counts from the reconstructed low-dimension representations
+        for the third modality.
     seed
         Random seed for model reproducibility.
     **model_kwargs
@@ -204,7 +207,7 @@ class triscPairing:
         adata3: Optional[AnnData] = None,
         batch_size: int = 2000,
     ) -> Tuple[np.array]:
-        """Returns the embeddings for both modalities.
+        """Returns the embeddings for all three modalities.
 
         Parameters
         ----------
@@ -258,7 +261,7 @@ class triscPairing:
         adata3: Optional[AnnData] = None,
         batch_size: int = 2000
     ) -> Tuple[np.array]:
-        """Returns the reconstructed counts for both modalities.
+        """Returns the reconstructed counts for all three modalities.
 
         Parameters
         ----------
@@ -320,7 +323,7 @@ class triscPairing:
         adata3: Optional[AnnData] = None,
         batch_size: int = 2000
     ) -> Tuple[np.array]:
-        """Return the likelihoods for both modalities.
+        """Return the likelihoods for all three modalities.
 
         Parameters
         ----------
