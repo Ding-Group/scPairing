@@ -22,8 +22,9 @@ Dependencies:
 
 Optional dependencies required by the tutorials:
 * scvi-tools>=1.0.0
-* harmonypy
-* muon
+* harmonypy>=0.0.9
+* muon>=0.1.3
+* scib>=1.1.4
 
 ### Install from Git
 
