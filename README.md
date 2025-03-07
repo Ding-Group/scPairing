@@ -21,7 +21,7 @@ Dependencies:
 * pandas>=1.5.0
 
 Optional dependencies required by the tutorials:
-* scvi-tools>=1.0.0
+* scvi-tools==1.0.2
 * harmonypy>=0.0.9
 * muon>=0.1.3
 * scib>=1.1.4
