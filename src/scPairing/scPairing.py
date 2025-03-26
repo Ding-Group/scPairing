@@ -96,7 +96,7 @@ class scPairing:
             raise ValueError("The two AnnData objects have different numbers of cells.")
 
         self.seed: Optional[int] = seed
-        if seed:
+        if seed is not None:
             set_seed(seed)
 
         if isinstance(transformed_obsm, str):
