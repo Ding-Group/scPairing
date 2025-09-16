@@ -142,6 +142,7 @@ class scPairing:
         epochs: int,
         batch_size: int = 2000,
         restart_training: bool = False,
+        train_dict: dict = {},
         **trainer_kwargs
     ) -> None:
         """Train the model.
@@ -155,6 +156,9 @@ class scPairing:
         restart_training
             Whether to re-initialize model parameters and train from scratch, or
             to continue training from the current parameters.
+        train_dict
+            Dictionary possibly containing weight of modality discriminative,
+            batch discriminative, or cosine similarity loss.
         **trainer_kwargs
             Keyword arguments for UnsupervisedTrainer
         """
@@ -176,6 +180,9 @@ class scPairing:
             n_epochs=epochs,
             need_reconstruction=need_reconstruction,
             batch_col=self.batch_col,
+            modality_discriminative_weight=train_dict.get('modality_discriminative_weight', 1),
+            batch_discriminative_weight=train_dict.get('batch_discriminative_weight', 1),
+            cosine_loss_weight=train_dict.get('cosine_loss_weight', 1),
             seed=self.seed
         )
 

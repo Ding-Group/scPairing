@@ -503,7 +503,7 @@ class Model(nn.Module):
             discriminative_loss = self.bce_loss(torch.cat([mod1_preds, mod2_preds]).squeeze(-1), truth.squeeze(-1))
             fwd_dict['modality_discriminative'] = discriminative_loss
 
-            loss = loss - discriminative_loss
+            loss = loss - discriminative_loss * hyper_param_dict.get('modality_discriminative_weight', 1)
 
         if self.batch_discriminative and self.training:
             batch_pred_1 = self.batch_discriminator(mod1_features)
@@ -512,12 +512,12 @@ class Model(nn.Module):
             batch_loss = self.ce_loss(torch.cat([batch_pred_1, batch_pred_2]).squeeze(-1), truth.squeeze(-1))
             fwd_dict['batch_discriminative'] = batch_loss
 
-            loss = loss - batch_loss * hyper_param_dict.get('batch_weight', 1)
+            loss = loss - batch_loss * hyper_param_dict.get('batch_discriminative_weight', 1)
 
         if self.cosine_loss and self.training:
             cos_loss = self.cosine_loss(mod1_features, mod2_features).mean()
             # Want to encourage them to be similar
-            loss = loss - cos_loss
+            loss = loss - cos_loss * hyper_param_dict.get('cosine_loss_weight', 1)
 
             fwd_dict['dist'] = cos_loss
 

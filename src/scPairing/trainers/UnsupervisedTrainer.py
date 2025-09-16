@@ -184,6 +184,9 @@ class UnsupervisedTrainer:
         kl_warmup_ratio: float = 0.,
         min_kl_weight: float = 0.,
         max_kl_weight: float = 1e-3,
+        modality_discriminative_weight: float = 1.,
+        batch_discriminative_weight: float = 1.,
+        cosine_loss_weight: float = 1.,
         batch_col: str = "batch_indices",
         save_model_ckpt: bool = True,
         ping_every: Optional[int] = None,
@@ -243,6 +246,9 @@ class UnsupervisedTrainer:
                 kl_warmup_ratio=kl_warmup_ratio,
                 min_kl_weight=min_kl_weight,
                 max_kl_weight=max_kl_weight,
+                modality_discriminative_weight=modality_discriminative_weight,
+                batch_discriminative_weight=batch_discriminative_weight,
+                cosine_loss_weight=cosine_loss_weight
             )
             recorder.update(new_record, self.epoch, n_epochs, next_ckpt_epoch)
             self.update_step()  # updates the learning rate
@@ -296,8 +302,10 @@ class UnsupervisedTrainer:
 
         # construct hyper_param_dict
         hyper_param_dict = {
-            'kl_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, kwargs['kl_warmup_ratio'], kwargs['min_kl_weight'], kwargs['max_kl_weight'])
-            # 'batch_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, 1, 1, 100)
+            'kl_weight': self._calc_weight(self.epoch, kwargs['n_epochs'], 0, kwargs['kl_warmup_ratio'], kwargs['min_kl_weight'], kwargs['max_kl_weight']),
+            'modality_discriminative_weight': kwargs['modality_discriminative_weight'],
+            'batch_discriminative_weight': kwargs['batch_discriminative_weight'],
+            'cosine_loss_weight': kwargs['cosine_loss_weight']
         }
 
         # construct data_dict
